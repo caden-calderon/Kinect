@@ -36,6 +36,7 @@ add_library(kstudio_render STATIC
   render/background_plate.cpp
   render/capsule_mesh.cpp
   render/capsule_pipeline.cpp
+  render/completion_surfels.cpp
   render/camera_navigation.cpp
   render/camera_motion.cpp
   render/gl_util.cpp

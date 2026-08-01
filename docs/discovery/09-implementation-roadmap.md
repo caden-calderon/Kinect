@@ -10,8 +10,8 @@ Ordering note: the original roadmap made two justified changes to the goal's
 1→10 spine — replay before rendering and recording-under-load earlier. On
 2026-08-01 Caden approved a third change after accepting phase 3: establish
 the **tracked-body and capsule foundation before the remaining motion and
-particle aesthetics**. This proves those later operators against observed,
-hybrid, and inferred geometry while their contracts are still cheap to shape.
+particle aesthetics**. This proves those later operators against observed and
+explicitly inferred geometry while their contracts are still cheap to shape.
 The numbered capability names remain stable for history; active execution is
 phase 3 → tracked/capsule foundation from 7–8 → E6 → phases 4–6 → the remaining
 8 work. The governing detail is
@@ -106,9 +106,12 @@ provenance; One Euro filtering; acquisition/release hysteresis; staleness and
 failure display; fixed-capacity tracked-body and capsule contracts. The later
 phase-4 continuation adds the bone-velocity motion term, body-local particle
 frames, and bone emitters against this contract.
-*Current:* the provider, lift/filter/state logic, capsules, telemetry, and
-`observed` / `hybrid` / `inferred` compositor are implemented as of
-2026-08-01. The source-keyed frozen pose sidecar and live E6 run remain.
+*Current:* the provider, lift/filter/state logic, semantic support capsules,
+telemetry, and `observed` / `completion` / `diagnostic` compositor are
+implemented as of 2026-08-01. Landmark presence is separated from visibility,
+limb depth association is model-consistency gated, and occluded elbows use a
+stable two-link arm constraint. The source-keyed frozen pose sidecar and live
+completion run remain.
 *Exit gate:* tracking dropout degrades aesthetically (release/fallback), never
 crashes; live contention meets the E6 gate; the later skeleton term improves
 fast-swing response on the golden/body take. *Non-goals:* parametric mesh
@@ -116,10 +119,14 @@ fitting.
 
 ## Phase 8 — Inferred-body experiment lane
 
-*Entry:* Phase 7. *Contains:* the E6 frozen/live capsule judgment, then the
-capsule-SDF completion volume and Magnetic Completion look. Only if E6 says
-capsule geometry is insufficient: E6b and a low-Hz parametric fitter provider
-(license posture per [10](10-open-decisions.md)).
+*Entry:* Phase 7. *Contains:* Caden's E6 verdict rejected complete visible
+capsules but retained them as support volumes. The active E6b slice is
+arm-first Magnetic Completion: depth-consistent joint association, two-link
+hidden-elbow solving, and observed-raster support masking over bounded inferred
+surfels. If that local completion still cannot produce plausible free-orbit
+volume, evaluate a low-Hz parametric fitter provider (license posture per
+[10](10-open-decisions.md)); do not adopt one merely because the diagnostic
+mannequin looked crude.
 *Exit gate:* Magnetic Completion accepted by Caden; measured/inferred
 visual vocabulary demonstrably readable. *Non-goals:* identity fidelity.
 

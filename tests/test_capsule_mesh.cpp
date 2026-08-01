@@ -12,7 +12,8 @@ TEST_CASE("capsule mesh is bounded, finite, and preserves provenance") {
     body.capsules[i].b = {float(i) * 0.01f, 0.3f, -2.0f};
     body.capsules[i].radius_m = 0.05f;
     body.capsules[i].confidence = 0.75f;
-    body.capsules[i].observed_weight = 0.5f;
+    body.capsules[i].a_observed_weight = 0.25f;
+    body.capsules[i].b_observed_weight = 0.75f;
   }
 
   CapsuleMeshBuilder mesh;
@@ -24,14 +25,15 @@ TEST_CASE("capsule mesh is bounded, finite, and preserves provenance") {
     CHECK(finite(vertex.normal));
     CHECK(length(vertex.normal) == doctest::Approx(1.0f).epsilon(0.001));
     CHECK(vertex.confidence == doctest::Approx(0.75f));
-    CHECK(vertex.observed_weight == doctest::Approx(0.5f));
+    CHECK((vertex.observed_weight == doctest::Approx(0.25f) ||
+           vertex.observed_weight == doctest::Approx(0.75f)));
   }
 }
 
 TEST_CASE("capsule radius scaling changes surface distance without changing topology") {
   CapsuleBody body;
   body.count = 1;
-  body.capsules[0] = {{0, 0, -2}, {0, 1, -2}, 0.1f, 1.0f, 0.0f, CapsuleSemantic::Spine};
+  body.capsules[0] = {{0, 0, -2}, {0, 1, -2}, 0.1f, 1.0f, 0.0f, 0.0f, CapsuleSemantic::Spine};
   CapsuleMeshBuilder mesh;
   mesh.build(body, 1.0f);
   const auto base_vertices = mesh.vertices();

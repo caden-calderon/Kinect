@@ -81,12 +81,12 @@ instead), `mcap` (vendored per-spike via FetchContent).
 ## Optional pose provider
 
 The studio stays fully usable in its default `observed` mode without an ML
-runtime. Install the local pose provider explicitly when using `hybrid` or
-`inferred` geometry:
+runtime. Install the local pose provider explicitly when using `completion`
+or the capsule-only `diagnostic` geometry:
 
 ```bash
 scripts/setup-pose-provider.sh
-prime-run build/src/kstudio --geometry-mode hybrid
+prime-run build/src/kstudio --geometry-mode completion
 ```
 
 Setup creates the ignored `providers/mediapipe/.venv`, installs the pinned

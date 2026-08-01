@@ -69,19 +69,21 @@ What exists now:
   color-view toggle, isolated-depth-speck cleanup, and free orbit/pan/dolly
   navigation; behavior and limits are documented in
   [docs/subject-framing.md](docs/subject-framing.md).
-- **Tracked-body/capsule foundation implemented 2026-08-01.** The
-  user-approved ordering now establishes the second geometry path before
-  further motion/look work: a versioned out-of-process MediaPipe adapter,
-  exact source-frame pairing, Kinect-metric landmark lifting, explicit
-  observed/model provenance, One Euro filtering, acquire/release hysteresis,
-  bounded capsule topology, and `observed` / `hybrid` / `inferred` render
-  modes. Inferred mode fails safely back to the accepted observed renderer.
-  Setup, privacy behavior, controls, and remaining E6 gate are documented in
-  [docs/tracked-body.md](docs/tracked-body.md); the governing architecture is
-  [docs/plan-tracked-capsule-foundation.md](docs/plan-tracked-capsule-foundation.md).
-  74 no-hardware test cases plus OpenGL replay self-tests cover the current
-  foundation (`cd build && ctest`). The frozen pose sidecar and Caden's live
-  E6 capsule judgment remain next; no parametric-body choice has been made.
+- **Tracked-body foundation and arm-first occlusion completion implemented
+  2026-08-01.** The provider isolation, exact source pairing, Kinect-metric
+  placement, provenance, filtering, and bounded capsule support topology all
+  remain. Caden's extended-arm review rejected the solid capsule replacement
+  and endpoint-alpha hybrid as the wrong product behavior. The corrected
+  `completion` mode now separates landmark presence from visibility, rejects
+  foreground hand depth as an elbow, constrains hidden elbows with stable
+  two-link arm lengths, and adds only depth-tested arm surfels unsupported by
+  the measured cloud. The full capsule body is `diagnostic` only; `observed`
+  remains the safe default/fallback. See
+  [docs/tracked-body.md](docs/tracked-body.md) and the active
+  [occlusion-completion plan](docs/plan-occlusion-completion.md). 79
+  no-hardware test cases plus OpenGL replay self-tests cover the current
+  foundation (`cd build && ctest`). Live extended-arm approval and the frozen
+  pose sidecar remain open; no parametric-body choice has been made.
 - Discovery docs updated `[verify]` → `[measured]` where evidence
   exists; the discovery package remains the source of truth.
 

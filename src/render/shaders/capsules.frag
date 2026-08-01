@@ -7,14 +7,12 @@ in float depth_observed_weight;
 
 uniform float opacity;
 uniform float confidence_min;
-uniform bool hybrid_mode;
 
 layout(location = 0) out vec4 out_color;
 
 void main() {
   if (joint_confidence < confidence_min) discard;
-  float inferred_coverage = hybrid_mode ? 1.0 - depth_observed_weight : 1.0;
-  float alpha = opacity * smoothstep(confidence_min, 1.0, joint_confidence) * inferred_coverage;
+  float alpha = opacity * smoothstep(confidence_min, 1.0, joint_confidence);
   if (alpha < 0.005) discard;
 
   vec3 n = normalize(world_normal);

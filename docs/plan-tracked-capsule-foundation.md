@@ -1,7 +1,15 @@
 # Plan — tracked-body and capsule foundation
 
-**Status:** approved by Caden on 2026-08-01; first live vertical slice
-implemented, E6 replay/live acceptance still in progress.
+**Status:** foundation retained; capsule presentation rejected by Caden's
+2026-08-01 extended-arm E6 review and superseded by
+[plan-occlusion-completion.md](plan-occlusion-completion.md).
+
+The rejection is specific and useful: process isolation, frame identity,
+metric lift, provenance, filtering, hysteresis, and the semantic support
+topology remain the base. A complete visible mannequin and whole-capsule
+endpoint alpha did not fill the Kinect's self-occlusion gaps. Capsules are now
+diagnostic/support volumes; the active product path is observed geometry plus
+support-masked inferred surfels.
 
 ## Implementation checkpoint — 2026-08-01
 

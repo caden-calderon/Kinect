@@ -37,8 +37,10 @@ struct Capsule {
   Vec3 b;
   float radius_m = 0.0f;
   float confidence = 0.0f;
-  /// Fraction of endpoints anchored directly to Kinect depth: 0, 0.5, or 1.
-  float observed_weight = 0.0f;
+  /// Endpoint evidence stays separate so completion can fade toward an
+  /// inferred joint instead of treating an entire limb as one binary span.
+  float a_observed_weight = 0.0f;
+  float b_observed_weight = 0.0f;
   CapsuleSemantic semantic = CapsuleSemantic::Spine;
 };
 

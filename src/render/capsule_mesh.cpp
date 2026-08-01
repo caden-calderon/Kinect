@@ -22,7 +22,7 @@ void CapsuleMeshBuilder::build(const CapsuleBody& body, float radius_scale) {
 void CapsuleMeshBuilder::addCapsule(const Capsule& capsule, float radius_scale) {
   if (!finite(capsule.a) || !finite(capsule.b) || !std::isfinite(capsule.radius_m) ||
       capsule.radius_m <= 0.0f || !std::isfinite(capsule.confidence) ||
-      !std::isfinite(capsule.observed_weight))
+      !std::isfinite(capsule.a_observed_weight) || !std::isfinite(capsule.b_observed_weight))
     return;
   if (vertices_.size() + kVerticesPerCapsule > kMaximumVertices ||
       indices_.size() + kIndicesPerCapsule > kMaximumIndices)
@@ -49,8 +49,9 @@ void CapsuleMeshBuilder::addCapsule(const Capsule& capsule, float radius_scale) 
       const float phi = float(segment) / kRadialSegments * 2.0f * std::numbers::pi_v<float>;
       const Vec3 outward =
           tangent * (radial * std::cos(phi)) + bitangent * (radial * std::sin(phi)) + axis * axial;
+      const float observed_weight = lower ? capsule.a_observed_weight : capsule.b_observed_weight;
       vertices_.push_back({center + outward * radius, normalized(outward), capsule.confidence,
-                           std::clamp(capsule.observed_weight, 0.0f, 1.0f)});
+                           std::clamp(observed_weight, 0.0f, 1.0f)});
     }
   }
 

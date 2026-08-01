@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <memory>
 
 #include "track/body_tracker.hpp"
@@ -92,6 +93,28 @@ BodyTracker::Config immediateConfig() {
   return config;
 }
 
+PoseObservation outstretchedOccludedArmPose(uint64_t frame_id, float elbow_visibility) {
+  PoseObservation observation = syntheticPose(frame_id);
+  auto place = [&](BodyJoint joint, Vec3 model, float visibility = 0.95f) {
+    PoseLandmark& landmark = observation.joints[jointIndex(joint)];
+    // Elbow and wrist deliberately project onto the same foreground hand
+    // patch. Model-relative Z still places the elbow behind the hand.
+    landmark.image = {360.0f / kDepthWidth, 170.0f / kDepthHeight, 0.0f};
+    landmark.model = model;
+    landmark.visibility = visibility;
+    landmark.presence = 0.95f;
+  };
+  place(BodyJoint::LeftElbow, {0.35f, -0.30f, -0.30f}, elbow_visibility);
+  place(BodyJoint::LeftWrist, {0.50f, -0.25f, -0.55f});
+  return observation;
+}
+
+std::unique_ptr<DepthPlane> outstretchedOccludedArmDepth() {
+  auto depth = syntheticDepth();
+  fillPatch(*depth, 360, 170, 1290.0f);
+  return depth;
+}
+
 }  // namespace
 
 TEST_CASE("CPU registration maps synthetic depth pixels into color pixels") {
@@ -161,4 +184,72 @@ TEST_CASE("tracking rejects a single metric anchor as an underconstrained body")
   sparse_depth->dmm.fill(0);
   fillPatch(*sparse_depth, 300, 150, 2000.0f);
   CHECK_FALSE(tracker.update(syntheticPose(1), *sparse_depth, 2000.0f));
+}
+
+TEST_CASE("foreground hand depth cannot masquerade as an occluded elbow") {
+  BodyTracker::Config config = immediateConfig();
+  config.model_depth_tolerance_mm = 160.0f;
+  BodyTracker tracker(syntheticCalibration(), config);
+  const auto depth = outstretchedOccludedArmDepth();
+  const auto body = tracker.update(outstretchedOccludedArmPose(1, 0.95f), *depth, 2000.0f);
+  REQUIRE(body);
+
+  const TrackedJoint& shoulder = body->joint(BodyJoint::LeftShoulder);
+  const TrackedJoint& elbow = body->joint(BodyJoint::LeftElbow);
+  const TrackedJoint& wrist = body->joint(BodyJoint::LeftWrist);
+  CHECK(shoulder.source == JointPositionSource::ObservedDepth);
+  CHECK(elbow.source == JointPositionSource::ModelInferred);
+  CHECK(wrist.source == JointPositionSource::ObservedDepth);
+
+  const PoseObservation pose = outstretchedOccludedArmPose(1, 0.95f);
+  const float expected_upper = length(pose.joints[jointIndex(BodyJoint::LeftElbow)].model -
+                                      pose.joints[jointIndex(BodyJoint::LeftShoulder)].model) *
+                               body->body_scale;
+  const float expected_lower = length(pose.joints[jointIndex(BodyJoint::LeftWrist)].model -
+                                      pose.joints[jointIndex(BodyJoint::LeftElbow)].model) *
+                               body->body_scale;
+  CHECK(length(elbow.position_m - shoulder.position_m) ==
+        doctest::Approx(expected_upper).epsilon(0.01));
+  CHECK(length(wrist.position_m - elbow.position_m) ==
+        doctest::Approx(expected_lower).epsilon(0.01));
+}
+
+TEST_CASE("present but hidden elbow remains available to the model prior") {
+  BodyTracker::Config config = immediateConfig();
+  config.model_depth_tolerance_mm = 160.0f;
+  BodyTracker tracker(syntheticCalibration(), config);
+  const auto depth = outstretchedOccludedArmDepth();
+  const auto body = tracker.update(outstretchedOccludedArmPose(1, 0.05f), *depth, 2000.0f);
+  REQUIRE(body);
+  const TrackedJoint& elbow = body->joint(BodyJoint::LeftElbow);
+  REQUIRE(elbow.usable());
+  CHECK(elbow.source == JointPositionSource::ModelInferred);
+  CHECK(elbow.confidence >= 0.10f);
+  CHECK(elbow.confidence < body->joint(BodyJoint::LeftShoulder).confidence);
+}
+
+TEST_CASE("arm lengths adapt slowly instead of following per-frame model jitter") {
+  BodyTracker::Config config = immediateConfig();
+  config.model_depth_tolerance_mm = 160.0f;
+  config.bone_length_adaptation = 0.05f;
+  BodyTracker tracker(syntheticCalibration(), config);
+  const auto depth = outstretchedOccludedArmDepth();
+
+  const auto first = tracker.update(outstretchedOccludedArmPose(1, 0.05f), *depth, 2000.0f);
+  REQUIRE(first);
+  const float first_upper = length(first->joint(BodyJoint::LeftElbow).position_m -
+                                   first->joint(BodyJoint::LeftShoulder).position_m);
+
+  PoseObservation jittered = outstretchedOccludedArmPose(2, 0.05f);
+  jittered.joints[jointIndex(BodyJoint::LeftElbow)].model.y = 0.0f;
+  const auto second = tracker.update(jittered, *depth, 2000.0f);
+  REQUIRE(second);
+  const float second_upper = length(second->joint(BodyJoint::LeftElbow).position_m -
+                                    second->joint(BodyJoint::LeftShoulder).position_m);
+  const float raw_jittered_upper =
+      length(jittered.joints[jointIndex(BodyJoint::LeftElbow)].model -
+             jittered.joints[jointIndex(BodyJoint::LeftShoulder)].model) *
+      second->body_scale;
+
+  CHECK(std::abs(second_upper - first_upper) < std::abs(raw_jittered_upper - first_upper) * 0.2f);
 }

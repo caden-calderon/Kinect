@@ -4,7 +4,7 @@
 //   kstudio --take <file.mcap>  replay (same pipeline, same controls)
 //   kstudio --plate <file>      explicitly load a scene background plate
 //   kstudio --camera-preview    start in the raw Kinect color view
-//   kstudio --geometry-mode M   observed, hybrid, or inferred
+//   kstudio --geometry-mode M   observed, completion, or diagnostic
 //   kstudio --synthetic-body    deterministic capsule diagnostic (replay)
 //
 // Keys: Tab = clean output · C = Kinect camera/3D view · F = reset camera
@@ -146,8 +146,10 @@ void drawParamsPanel(Parameters& params, bool automatic_subject_range) {
 
 std::optional<GeometryMode> parseGeometryMode(const char* name) {
   if (!std::strcmp(name, "observed")) return GeometryMode::Observed;
-  if (!std::strcmp(name, "hybrid")) return GeometryMode::Hybrid;
-  if (!std::strcmp(name, "inferred")) return GeometryMode::Inferred;
+  if (!std::strcmp(name, "completion") || !std::strcmp(name, "hybrid"))
+    return GeometryMode::Completion;
+  if (!std::strcmp(name, "diagnostic") || !std::strcmp(name, "inferred"))
+    return GeometryMode::Diagnostic;
   return std::nullopt;
 }
 
@@ -301,6 +303,7 @@ int main(int argc, char** argv) {
     calib = live->calibration();
   }
   observed.setCalibration(*calib);
+  capsules.setCalibration(*calib);
   BodyTracker body_tracker(*calib);
   CapsuleBodyBuilder capsule_builder;
   SubjectDepthTracker tracking_subject_tracker;
@@ -560,10 +563,10 @@ int main(int argc, char** argv) {
         capsules.hasBody() && (synthetic_body || (last_body_update_ns != 0 &&
                                                   now_ns - last_body_update_ns <= kBodyStaleNs));
     const GeometryMode geometry_mode = capsules.geometryMode();
-    const bool draw_observed = geometry_mode != GeometryMode::Inferred || !body_healthy;
+    const bool draw_observed = geometry_mode != GeometryMode::Diagnostic || !body_healthy;
 
-    // Observed depth owns its pass. Capsules compose as a separate inferred
-    // layer and never replace or mutate the sensor textures.
+    // Observed depth owns its pass. Completion reads its position texture for
+    // support but cannot replace or mutate any sensor product.
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
@@ -571,7 +574,7 @@ int main(int argc, char** argv) {
     if (body_healthy && geometry_mode != GeometryMode::Observed) {
       glEnable(GL_BLEND);
       glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-      capsules.draw(vp.m, world.m, geometry_mode);
+      capsules.draw(vp.m, view.m, world.m, geometry_mode, observed.positionTex());
     }
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
@@ -655,10 +658,13 @@ int main(int argc, char** argv) {
       }
       if (geometry_mode != GeometryMode::Observed) {
         if (body_healthy) {
-          ImGui::Text("body %s | inferred layer active", trackingStateName(body_tracking_state));
+          const char* layer_name = geometry_mode == GeometryMode::Completion
+                                       ? "occlusion completion"
+                                       : "capsule diagnostic";
+          ImGui::Text("body %s | %s active", trackingStateName(body_tracking_state), layer_name);
         } else {
           ImGui::TextColored({1.0f, 0.65f, 0.2f, 1.0f},
-                             "inferred body unavailable; showing observed fallback");
+                             "body prior unavailable; showing observed fallback");
         }
       }
       if (pose_provider) {

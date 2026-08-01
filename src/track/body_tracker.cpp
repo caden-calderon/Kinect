@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace kstudio {
 
@@ -56,6 +57,25 @@ bool isEndEffector(BodyJoint joint) {
   }
 }
 
+float metricAnchorWeight(BodyJoint joint) {
+  switch (joint) {
+    case BodyJoint::LeftShoulder:
+    case BodyJoint::RightShoulder:
+    case BodyJoint::LeftHip:
+    case BodyJoint::RightHip:
+      return 1.0f;
+    case BodyJoint::LeftEar:
+    case BodyJoint::RightEar:
+    case BodyJoint::Nose:
+      return 0.55f;
+    case BodyJoint::MouthLeft:
+    case BodyJoint::MouthRight:
+      return 0.35f;
+    default:
+      return 0.0f;
+  }
+}
+
 Vec3 modelInDepthAxes(const Vec3& model) {
   // MediaPipe: +X image-right, +Y down, negative Z toward the camera.
   // Engine DepthCam: +X right, +Y up, negative Z forward.
@@ -63,6 +83,32 @@ Vec3 modelInDepthAxes(const Vec3& model) {
 }
 
 float clampedConfidence(float value) { return std::clamp(value, 0.0f, 1.0f); }
+
+Vec3 constrainedElbow(const Vec3& shoulder, const Vec3& wrist, const Vec3& prior,
+                      float upper_length, float lower_length) {
+  const Vec3 reach = wrist - shoulder;
+  const float distance = length(reach);
+  if (distance < 1e-5f || upper_length < 0.05f || lower_length < 0.05f ||
+      !std::isfinite(upper_length) || !std::isfinite(lower_length))
+    return prior;
+
+  const Vec3 direction = reach / distance;
+  const float x_unclamped =
+      (upper_length * upper_length - lower_length * lower_length + distance * distance) /
+      (2.0f * distance);
+  const float x = std::clamp(x_unclamped, 0.0f, upper_length);
+  const float height_squared = std::max(upper_length * upper_length - x * x, 0.0f);
+  const float height = std::sqrt(height_squared);
+  const Vec3 circle_center = shoulder + direction * x;
+
+  Vec3 bend = prior - circle_center;
+  bend = bend - direction * dot(bend, direction);
+  if (length(bend) < 1e-5f) {
+    bend = cross(direction, {0.0f, 1.0f, 0.0f});
+    if (length(bend) < 1e-5f) bend = cross(direction, {1.0f, 0.0f, 0.0f});
+  }
+  return circle_center + normalized(bend) * height;
+}
 }  // namespace
 
 struct BodyTracker::LiftedBody {
@@ -150,7 +196,7 @@ BodyTracker::LiftedBody BodyTracker::lift(const PoseObservation& observation,
   size_t active_count = 0;
   for (size_t i = 0; i < kBodyJointCount; ++i) {
     const PoseLandmark& landmark = observation.joints[i];
-    if (landmark.confidence() < config_.observed_landmark_confidence ||
+    if (landmark.observedConfidence() < config_.observed_landmark_confidence ||
         !std::isfinite(landmark.image.x) || !std::isfinite(landmark.image.y) ||
         landmark.image.x < -0.1f || landmark.image.x > 1.1f || landmark.image.y < -0.1f ||
         landmark.image.y > 1.1f)
@@ -187,104 +233,193 @@ BodyTracker::LiftedBody BodyTracker::lift(const PoseObservation& observation,
     }
   }
 
-  int observed_count = 0;
-  float observed_confidence_sum = 0.0f;
-  for (size_t i = 0; i < kBodyJointCount; ++i) {
-    const CandidateSet& set = candidates[i];
-    if (set.count < config_.minimum_depth_samples) continue;
-    std::array<float, kCandidateCapacity> depths{};
-    for (int sample = 0; sample < set.count; ++sample)
-      depths[size_t(sample)] = set.samples[size_t(sample)].depth_mm;
-    std::sort(depths.begin(), depths.begin() + set.count);
-    const float median_depth = depths[size_t(set.count / 2)];
+  auto resolveCandidate =
+      [&](size_t joint_index,
+          std::optional<float> expected_depth_mm) -> std::optional<TrackedJoint> {
+    const CandidateSet& set = candidates[joint_index];
+    if (set.count < config_.minimum_depth_samples) return std::nullopt;
+
+    float cluster_depth = 0.0f;
+    if (expected_depth_mm) {
+      float best_score = std::numeric_limits<float>::infinity();
+      for (int sample = 0; sample < set.count; ++sample) {
+        const DepthCandidate& candidate = set.samples[size_t(sample)];
+        const float depth_delta = std::abs(candidate.depth_mm - *expected_depth_mm);
+        if (depth_delta > config_.model_depth_tolerance_mm) continue;
+        const float normalized_depth =
+            depth_delta / std::max(config_.model_depth_tolerance_mm, 1.0f);
+        const float normalized_pixel_distance =
+            candidate.distance_squared / std::max(search_radius_squared, 1.0f);
+        const float score = normalized_pixel_distance + normalized_depth * normalized_depth;
+        if (score < best_score) {
+          best_score = score;
+          cluster_depth = candidate.depth_mm;
+        }
+      }
+      if (!std::isfinite(best_score)) return std::nullopt;
+    } else {
+      std::array<float, kCandidateCapacity> depths{};
+      for (int sample = 0; sample < set.count; ++sample)
+        depths[size_t(sample)] = set.samples[size_t(sample)].depth_mm;
+      std::sort(depths.begin(), depths.begin() + set.count);
+      cluster_depth = depths[size_t(set.count / 2)];
+    }
 
     Vec3 position_sum{};
     float weight_sum = 0.0f;
     int inlier_count = 0;
     for (int sample = 0; sample < set.count; ++sample) {
       const DepthCandidate& candidate = set.samples[size_t(sample)];
-      if (std::abs(candidate.depth_mm - median_depth) > config_.depth_inlier_mm) continue;
-      const float weight = 1.0f / (1.0f + candidate.distance_squared);
+      if (std::abs(candidate.depth_mm - cluster_depth) > config_.depth_inlier_mm) continue;
+      if (expected_depth_mm &&
+          std::abs(candidate.depth_mm - *expected_depth_mm) > config_.model_depth_tolerance_mm)
+        continue;
+      float weight = 1.0f / (1.0f + candidate.distance_squared);
+      if (expected_depth_mm) {
+        const float normalized_depth = (candidate.depth_mm - *expected_depth_mm) /
+                                       std::max(config_.model_depth_tolerance_mm, 1.0f);
+        weight /= 1.0f + normalized_depth * normalized_depth;
+      }
       position_sum += candidate.position_m * weight;
       weight_sum += weight;
       ++inlier_count;
     }
-    if (inlier_count < config_.minimum_depth_samples || weight_sum <= 0.0f) continue;
+    if (inlier_count < config_.minimum_depth_samples || weight_sum <= 0.0f) return std::nullopt;
 
-    TrackedJoint& joint = output.joints[i];
+    TrackedJoint joint;
     joint.position_m = position_sum / weight_sum;
     const float sample_support = std::clamp(float(inlier_count) / 8.0f, 0.35f, 1.0f);
-    joint.confidence = observation.joints[i].confidence() * sample_support;
+    float depth_consistency = 1.0f;
+    if (expected_depth_mm) {
+      const float residual = std::abs(-joint.position_m.z * 1000.0f - *expected_depth_mm);
+      depth_consistency =
+          1.0f - 0.5f * std::clamp(residual / std::max(config_.model_depth_tolerance_mm, 1.0f),
+                                   0.0f, 1.0f);
+    }
+    joint.confidence =
+        observation.joints[joint_index].observedConfidence() * sample_support * depth_consistency;
     joint.source = JointPositionSource::ObservedDepth;
-    observed_confidence_sum += joint.confidence;
-    ++observed_count;
-  }
+    return joint;
+  };
 
-  // One coincident depth sample can translate a model but cannot establish a
-  // trustworthy metric body scale. Require a small consensus before the
-  // model prior is allowed to create any inferred geometry.
-  if (observed_count < config_.minimum_metric_anchors) return output;
-
-  Vec3 model_centroid{};
-  Vec3 observed_centroid{};
-  float centroid_weight = 0.0f;
-  int fit_count = 0;
+  std::array<TrackedJoint, kBodyJointCount> anchor_joints{};
+  int raw_anchor_count = 0;
   for (size_t i = 0; i < kBodyJointCount; ++i) {
-    const TrackedJoint& joint = output.joints[i];
-    const Vec3 model = modelInDepthAxes(observation.joints[i].model);
-    if (!joint.usable() || !finite(model)) continue;
-    const float weight = std::max(joint.confidence, 0.05f);
-    model_centroid += model * weight;
-    observed_centroid += joint.position_m * weight;
-    centroid_weight += weight;
-    ++fit_count;
+    if (metricAnchorWeight(static_cast<BodyJoint>(i)) <= 0.0f) continue;
+    if (const auto joint = resolveCandidate(i, std::nullopt)) {
+      anchor_joints[i] = *joint;
+      ++raw_anchor_count;
+    }
   }
-  if (fit_count == 0 || centroid_weight <= 0.0f) return output;
-  model_centroid = model_centroid / centroid_weight;
-  observed_centroid = observed_centroid / centroid_weight;
 
-  float scale_numerator = 0.0f;
-  float scale_denominator = 0.0f;
+  if (raw_anchor_count < config_.minimum_metric_anchors) return output;
+
+  struct SimilarityFit {
+    Vec3 translation;
+    float scale = 1.0f;
+    int count = 0;
+  };
+
+  auto fitAnchors =
+      [&](const std::optional<SimilarityFit>& reference) -> std::optional<SimilarityFit> {
+    Vec3 model_centroid{};
+    Vec3 observed_centroid{};
+    float centroid_weight = 0.0f;
+    int fit_count = 0;
+    for (size_t i = 0; i < kBodyJointCount; ++i) {
+      const TrackedJoint& joint = anchor_joints[i];
+      const Vec3 model = modelInDepthAxes(observation.joints[i].model);
+      if (!joint.usable() || !finite(model)) continue;
+      if (reference) {
+        const Vec3 residual =
+            joint.position_m - (reference->translation + model * reference->scale);
+        if (length(residual) > config_.anchor_residual_tolerance_m) continue;
+      }
+      const float weight =
+          std::max(joint.confidence, 0.05f) * metricAnchorWeight(static_cast<BodyJoint>(i));
+      model_centroid += model * weight;
+      observed_centroid += joint.position_m * weight;
+      centroid_weight += weight;
+      ++fit_count;
+    }
+    if (fit_count < config_.minimum_metric_anchors || centroid_weight <= 0.0f) return std::nullopt;
+    model_centroid = model_centroid / centroid_weight;
+    observed_centroid = observed_centroid / centroid_weight;
+
+    float scale_numerator = 0.0f;
+    float scale_denominator = 0.0f;
+    for (size_t i = 0; i < kBodyJointCount; ++i) {
+      const TrackedJoint& joint = anchor_joints[i];
+      const Vec3 model = modelInDepthAxes(observation.joints[i].model);
+      if (!joint.usable() || !finite(model)) continue;
+      if (reference) {
+        const Vec3 residual =
+            joint.position_m - (reference->translation + model * reference->scale);
+        if (length(residual) > config_.anchor_residual_tolerance_m) continue;
+      }
+      const float weight =
+          std::max(joint.confidence, 0.05f) * metricAnchorWeight(static_cast<BodyJoint>(i));
+      const Vec3 centered_model = model - model_centroid;
+      scale_numerator += weight * dot(centered_model, joint.position_m - observed_centroid);
+      scale_denominator += weight * dot(centered_model, centered_model);
+    }
+    SimilarityFit fit;
+    fit.scale = scale_denominator > 1e-6f
+                    ? std::clamp(scale_numerator / scale_denominator, 0.65f, 1.50f)
+                    : 1.0f;
+    fit.translation = observed_centroid - model_centroid * fit.scale;
+    fit.count = fit_count;
+    return fit;
+  };
+
+  const auto initial_fit = fitAnchors(std::nullopt);
+  if (!initial_fit) return output;
+  const SimilarityFit fit = fitAnchors(initial_fit).value_or(*initial_fit);
+
+  std::array<Vec3, kBodyJointCount> aligned_model{};
+  for (size_t i = 0; i < kBodyJointCount; ++i)
+    aligned_model[i] = fit.translation + modelInDepthAxes(observation.joints[i].model) * fit.scale;
+
+  int observed_count = 0;
+  int observed_anchor_count = 0;
+  float observed_confidence_sum = 0.0f;
   for (size_t i = 0; i < kBodyJointCount; ++i) {
-    const TrackedJoint& joint = output.joints[i];
-    const Vec3 model = modelInDepthAxes(observation.joints[i].model);
-    if (!joint.usable() || !finite(model)) continue;
-    const float weight = std::max(joint.confidence, 0.05f);
-    const Vec3 centered_model = model - model_centroid;
-    scale_numerator += weight * dot(centered_model, joint.position_m - observed_centroid);
-    scale_denominator += weight * dot(centered_model, centered_model);
+    if (!finite(aligned_model[i])) continue;
+    const float expected_depth_mm = -aligned_model[i].z * 1000.0f;
+    if (const auto joint = resolveCandidate(i, expected_depth_mm)) {
+      output.joints[i] = *joint;
+      observed_confidence_sum += joint->confidence;
+      ++observed_count;
+      if (metricAnchorWeight(static_cast<BodyJoint>(i)) > 0.0f) ++observed_anchor_count;
+    }
   }
-  const float body_scale = scale_denominator > 1e-6f
-                               ? std::clamp(scale_numerator / scale_denominator, 0.65f, 1.50f)
-                               : 1.0f;
-  const Vec3 translation = observed_centroid - model_centroid * body_scale;
+  if (observed_anchor_count < config_.minimum_metric_anchors || observed_count == 0) return output;
 
   float residual_squared = 0.0f;
   float residual_weight = 0.0f;
   for (size_t i = 0; i < kBodyJointCount; ++i) {
     const TrackedJoint& joint = output.joints[i];
-    const Vec3 model = modelInDepthAxes(observation.joints[i].model);
-    if (!joint.usable() || !finite(model)) continue;
+    if (!joint.usable() || metricAnchorWeight(static_cast<BodyJoint>(i)) <= 0.0f) continue;
     const float weight = std::max(joint.confidence, 0.05f);
-    const Vec3 error = joint.position_m - (translation + model * body_scale);
+    const Vec3 error = joint.position_m - aligned_model[i];
     residual_squared += weight * dot(error, error);
     residual_weight += weight;
   }
   const float rms = residual_weight > 0.0f ? std::sqrt(residual_squared / residual_weight) : 1.0f;
-  const float fit_support = std::clamp(float(fit_count) / 6.0f, 0.2f, 1.0f);
+  const float fit_support = std::clamp(float(fit.count) / 6.0f, 0.2f, 1.0f);
   const float fit_confidence = fit_support * std::exp(-rms / 0.25f);
 
   for (size_t i = 0; i < kBodyJointCount; ++i) {
     if (output.joints[i].usable()) continue;
     const PoseLandmark& landmark = observation.joints[i];
-    const Vec3 model = modelInDepthAxes(landmark.model);
-    if (landmark.confidence() < config_.minimum_landmark_confidence || !finite(model)) continue;
-    output.joints[i].position_m = translation + model * body_scale;
-    output.joints[i].confidence = clampedConfidence(landmark.confidence() * fit_confidence * 0.65f);
+    if (landmark.presence < config_.minimum_model_presence || !finite(aligned_model[i])) continue;
+    output.joints[i].position_m = aligned_model[i];
+    output.joints[i].confidence =
+        clampedConfidence(landmark.priorConfidence() * fit_confidence * 0.65f);
     output.joints[i].source = JointPositionSource::ModelInferred;
   }
 
-  output.body_scale = body_scale;
+  output.body_scale = fit.scale;
   output.confidence = clampedConfidence(observed_confidence_sum / float(observed_count));
   output.anchored = true;
   return output;
@@ -300,6 +435,7 @@ TrackedBodyFrame BodyTracker::filter(const PoseObservation& observation, const L
   }
   if (reset_filter) {
     for (OneEuroFilter& one_euro : filters_) one_euro.reset();
+    arm_lengths_ = {};
     dt_seconds = 1.0f / 30.0f;
   }
 
@@ -322,7 +458,47 @@ TrackedBodyFrame BodyTracker::filter(const PoseObservation& observation, const L
         isEndEffector(name) ? config_.end_effector_filter : config_.body_filter;
     tracked = raw;
     tracked.position_m = filters_[i].filter(raw.position_m, dt_seconds, filter_config);
-    if (last_tracking_body_ && last_tracking_body_->joints[i].usable() && !reset_filter)
+  }
+
+  auto constrainArm = [&](size_t arm_index, BodyJoint shoulder_name, BodyJoint elbow_name,
+                          BodyJoint wrist_name) {
+    TrackedJoint& shoulder = body.joint(shoulder_name);
+    TrackedJoint& elbow = body.joint(elbow_name);
+    TrackedJoint& wrist = body.joint(wrist_name);
+    const Vec3 model_shoulder =
+        modelInDepthAxes(observation.joints[jointIndex(shoulder_name)].model);
+    const Vec3 model_elbow = modelInDepthAxes(observation.joints[jointIndex(elbow_name)].model);
+    const Vec3 model_wrist = modelInDepthAxes(observation.joints[jointIndex(wrist_name)].model);
+    const float measured_upper = length(model_elbow - model_shoulder) * body.body_scale;
+    const float measured_lower = length(model_wrist - model_elbow) * body.body_scale;
+    ArmLengths& lengths = arm_lengths_[arm_index];
+    if (std::isfinite(measured_upper) && std::isfinite(measured_lower) && measured_upper >= 0.12f &&
+        measured_upper <= 0.65f && measured_lower >= 0.12f && measured_lower <= 0.65f) {
+      if (!lengths.initialized) {
+        lengths = {measured_upper, measured_lower, true};
+      } else {
+        const float adaptation = std::clamp(config_.bone_length_adaptation, 0.0f, 1.0f);
+        lengths.upper_m += (measured_upper - lengths.upper_m) * adaptation;
+        lengths.lower_m += (measured_lower - lengths.lower_m) * adaptation;
+      }
+    }
+    if (!lengths.initialized || shoulder.source != JointPositionSource::ObservedDepth ||
+        wrist.source != JointPositionSource::ObservedDepth ||
+        elbow.source != JointPositionSource::ModelInferred || !shoulder.usable() ||
+        !elbow.usable() || !wrist.usable())
+      return;
+    elbow.position_m = constrainedElbow(shoulder.position_m, wrist.position_m, elbow.position_m,
+                                        lengths.upper_m, lengths.lower_m);
+    elbow.confidence =
+        std::min(elbow.confidence, std::sqrt(shoulder.confidence * wrist.confidence) * 0.85f);
+  };
+  constrainArm(0, BodyJoint::LeftShoulder, BodyJoint::LeftElbow, BodyJoint::LeftWrist);
+  constrainArm(1, BodyJoint::RightShoulder, BodyJoint::RightElbow, BodyJoint::RightWrist);
+
+  for (size_t i = 0; i < kBodyJointCount; ++i) {
+    TrackedJoint& tracked = body.joints[i];
+    if (tracked.usable() && last_tracking_body_ && last_tracking_body_->joints[i].usable() &&
+        !reset_filter)
       tracked.velocity_mps =
           (tracked.position_m - last_tracking_body_->joints[i].position_m) / dt_seconds;
   }
@@ -381,6 +557,7 @@ std::optional<TrackedBodyFrame> BodyTracker::update(const PoseObservation& obser
 
 void BodyTracker::reset() {
   for (OneEuroFilter& one_euro : filters_) one_euro.reset();
+  arm_lengths_ = {};
   last_tracking_body_.reset();
   last_capture_ns_ = 0;
   consecutive_detections_ = 0;

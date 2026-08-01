@@ -21,6 +21,7 @@ add_executable(kstudio_tests
   test_body_tracker.cpp
   test_capsule_body.cpp
   test_capsule_mesh.cpp
+  test_completion_surfels.cpp
   test_one_euro.cpp
   test_pose_protocol.cpp
   test_pose_provider.cpp

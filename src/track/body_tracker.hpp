@@ -18,10 +18,13 @@ class BodyTracker {
   struct Config {
     int acquire_frames = 3;
     int release_frames = 10;
-    float minimum_landmark_confidence = 0.25f;
+    float minimum_model_presence = 0.25f;
     float observed_landmark_confidence = 0.40f;
     float color_search_radius_px = 24.0f;
     float depth_inlier_mm = 120.0f;
+    float model_depth_tolerance_mm = 200.0f;
+    float anchor_residual_tolerance_m = 0.30f;
+    float bone_length_adaptation = 0.05f;
     float subject_depth_tolerance_mm = 1200.0f;
     int minimum_depth_samples = 2;
     int minimum_metric_anchors = 3;
@@ -51,6 +54,11 @@ class BodyTracker {
   };
 
   struct LiftedBody;
+  struct ArmLengths {
+    float upper_m = 0.0f;
+    float lower_m = 0.0f;
+    bool initialized = false;
+  };
 
   LiftedBody lift(const PoseObservation& observation, const DepthPlane& depth,
                   std::optional<float> subject_depth_mm) const;
@@ -62,6 +70,7 @@ class BodyTracker {
   CalibrationBlob calibration_;
   std::vector<RegistrationPoint> registration_;
   std::array<OneEuroFilter, kBodyJointCount> filters_;
+  std::array<ArmLengths, 2> arm_lengths_{};
   std::optional<TrackedBodyFrame> last_tracking_body_;
   uint64_t last_capture_ns_ = 0;
   int consecutive_detections_ = 0;

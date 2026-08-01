@@ -65,8 +65,10 @@ TEST_CASE("capsule builder emits a bounded semantic body") {
     CHECK(capsule.radius_m > 0.0f);
     CHECK(capsule.confidence >= 0.0f);
     CHECK(capsule.confidence <= 1.0f);
-    CHECK(capsule.observed_weight >= 0.0f);
-    CHECK(capsule.observed_weight <= 1.0f);
+    CHECK(capsule.a_observed_weight >= 0.0f);
+    CHECK(capsule.a_observed_weight <= 1.0f);
+    CHECK(capsule.b_observed_weight >= 0.0f);
+    CHECK(capsule.b_observed_weight <= 1.0f);
     found_head |= capsule.semantic == CapsuleSemantic::Head;
     found_spine |= capsule.semantic == CapsuleSemantic::Spine;
   }
@@ -87,7 +89,8 @@ TEST_CASE("capsule confidence and provenance come from endpoints") {
       upper_arm = &capsules.capsules[i];
   REQUIRE(upper_arm);
   CHECK(upper_arm->confidence == doctest::Approx(0.4f));
-  CHECK(upper_arm->observed_weight == doctest::Approx(0.5f));
+  CHECK(upper_arm->a_observed_weight == doctest::Approx(1.0f));
+  CHECK(upper_arm->b_observed_weight == doctest::Approx(0.0f));
 }
 
 TEST_CASE("unusable joints remove dependent capsules without invalid geometry") {

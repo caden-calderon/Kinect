@@ -63,7 +63,24 @@ struct PoseLandmark {
   float visibility = 0.0f;
   float presence = 0.0f;
 
-  float confidence() const { return std::clamp(std::min(visibility, presence), 0.0f, 1.0f); }
+  /// Confidence that a depth sample at this image location actually belongs
+  /// to the joint. Visibility matters here: an occluded elbow must not steal
+  /// the foreground hand's depth merely because both project to one pixel.
+  float observedConfidence() const {
+    return std::clamp(std::min(visibility, presence), 0.0f, 1.0f);
+  }
+
+  /// Confidence in the articulated prior. Presence and visibility answer
+  /// different questions: a present-but-occluded joint remains useful for
+  /// completion, at deliberately reduced confidence.
+  float priorConfidence() const {
+    const float visible = std::clamp(visibility, 0.0f, 1.0f);
+    return std::clamp(presence, 0.0f, 1.0f) * (0.35f + 0.65f * visible);
+  }
+
+  /// Backwards-compatible spelling for code that specifically needs visible
+  /// observation confidence.
+  float confidence() const { return observedConfidence(); }
 };
 
 struct PoseObservation {

@@ -54,7 +54,8 @@ CapsuleBody CapsuleBodyBuilder::build(const TrackedBodyFrame& body) const {
     capsule.b = b.position;
     capsule.radius_m = std::max(radius_m, 0.005f);
     capsule.confidence = std::min(a.confidence, b.confidence);
-    capsule.observed_weight = (a.observed + b.observed) * 0.5f;
+    capsule.a_observed_weight = a.observed;
+    capsule.b_observed_weight = b.observed;
     capsule.semantic = semantic;
   };
   auto addJointPair = [&](CapsuleSemantic semantic, BodyJoint first, BodyJoint second,
