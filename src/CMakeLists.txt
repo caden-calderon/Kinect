@@ -21,9 +21,21 @@ add_library(kstudio_motion STATIC motion/flow_engine.cpp)
 target_include_directories(kstudio_motion SYSTEM PUBLIC ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(kstudio_motion PUBLIC kstudio_core ${OpenCV_LIBS})
 
+add_library(kstudio_track STATIC
+  track/body_tracker.cpp
+  track/capsule_body.cpp
+  track/diagnostic_body.cpp
+  track/one_euro.cpp
+  track/pose_protocol.cpp
+  track/pose_provider.cpp
+)
+target_link_libraries(kstudio_track PUBLIC kstudio_core)
+
 add_library(kstudio_render STATIC
   params/parameters.cpp
   render/background_plate.cpp
+  render/capsule_mesh.cpp
+  render/capsule_pipeline.cpp
   render/camera_navigation.cpp
   render/camera_motion.cpp
   render/gl_util.cpp
@@ -31,7 +43,7 @@ add_library(kstudio_render STATIC
   render/post_chain.cpp
   render/subject_focus.cpp
 )
-target_link_libraries(kstudio_render PUBLIC kstudio_core kstudio_motion nlohmann_json::nlohmann_json ${EPOXY_LIB})
+target_link_libraries(kstudio_render PUBLIC kstudio_core kstudio_motion kstudio_track nlohmann_json::nlohmann_json ${EPOXY_LIB})
 target_compile_definitions(kstudio_render PUBLIC
   KSTUDIO_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/render/shaders")
 

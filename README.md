@@ -55,7 +55,7 @@ What exists now:
   `src/render/`): GPU unprojection/normals/boundary, registered color,
   point + depth-surface modes, post chain, generic ImGui control panels,
   telemetry overlay, presets (Luminous Shell, Dense Veil committed),
-  live+record verified. 53 no-hardware test cases green (`cd build && ctest`).
+  live+record verified.
 - **Phase 3 accepted 2026-08-01.** Caden's initial live verdict was
   "flat/2D". The Caden-reviewed response in
   [docs/plan-user-focus.md](docs/plan-user-focus.md) is now implemented:
@@ -69,6 +69,19 @@ What exists now:
   color-view toggle, isolated-depth-speck cleanup, and free orbit/pan/dolly
   navigation; behavior and limits are documented in
   [docs/subject-framing.md](docs/subject-framing.md).
+- **Tracked-body/capsule foundation implemented 2026-08-01.** The
+  user-approved ordering now establishes the second geometry path before
+  further motion/look work: a versioned out-of-process MediaPipe adapter,
+  exact source-frame pairing, Kinect-metric landmark lifting, explicit
+  observed/model provenance, One Euro filtering, acquire/release hysteresis,
+  bounded capsule topology, and `observed` / `hybrid` / `inferred` render
+  modes. Inferred mode fails safely back to the accepted observed renderer.
+  Setup, privacy behavior, controls, and remaining E6 gate are documented in
+  [docs/tracked-body.md](docs/tracked-body.md); the governing architecture is
+  [docs/plan-tracked-capsule-foundation.md](docs/plan-tracked-capsule-foundation.md).
+  74 no-hardware test cases plus OpenGL replay self-tests cover the current
+  foundation (`cd build && ctest`). The frozen pose sidecar and Caden's live
+  E6 capsule judgment remain next; no parametric-body choice has been made.
 - Discovery docs updated `[verify]` → `[measured]` where evidence
   exists; the discovery package remains the source of truth.
 

@@ -16,9 +16,13 @@ spikes/*/out*/
 # Language and package-manager state
 /node_modules/
 /.venv/
+**/.venv/
 /venv/
 __pycache__/
 *.py[cod]
+
+# Downloaded inference assets (setup scripts verify immutable checksums)
+/providers/mediapipe/models/*.task
 
 # Local runtime data
 /recordings/

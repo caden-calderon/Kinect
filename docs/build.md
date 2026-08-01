@@ -74,8 +74,32 @@ mkdir -p out && ./build/e1_probe -t 600 -o out -p cl   # -p gl for fallback
 Present when this was written: `libusb 1.0.30`, `libjpeg-turbo 3.2.0`
 (TurboJPEG), `glfw 3.4`, `ocl-icd 2.3.4` + `opencl-nvidia 610.43.03`,
 `cmake 4.4.0`, `ninja`, `gcc 16.1.1`, `opencv 5.0.0` (for E2), Python 3
-(providers, analysis). Not present: `cuda`, `opencl-headers` (vendored
+(providers, analysis), and `bubblewrap` (the pose-provider network sandbox).
+Not present: `cuda`, `opencl-headers` (vendored
 instead), `mcap` (vendored per-spike via FetchContent).
+
+## Optional pose provider
+
+The studio stays fully usable in its default `observed` mode without an ML
+runtime. Install the local pose provider explicitly when using `hybrid` or
+`inferred` geometry:
+
+```bash
+scripts/setup-pose-provider.sh
+prime-run build/src/kstudio --geometry-mode hybrid
+```
+
+Setup creates the ignored `providers/mediapipe/.venv`, installs the pinned
+Python dependency set, and downloads the immutable BlazePose Lite float16 v1
+artifact. The download must match SHA-256
+`59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a`.
+The model binary and environment are intentionally not committed.
+
+At runtime `providers/mediapipe/run-provider.sh` enters a Bubblewrap namespace
+with no network and a read-only host filesystem. The C++ process passes the
+Kinect's already-compressed JPEG over an inherited local socket; image data is
+never uploaded. Use `--no-pose` to suppress provider startup explicitly.
+See [tracked-body.md](tracked-body.md) for the protocol and failure behavior.
 
 ## udev
 

@@ -6,12 +6,16 @@ explicit non-goals. The decision experiments
 ([07](07-decision-experiments.md)) run first, after Caden approves them;
 phases begin only after the experiments they depend on resolve.
 
-Ordering note: this follows the goal's suggested 1→10 spine with two
-justified changes — the **replay fixture moves before first rendering**
-(so every visual phase has a deterministic test input from day one), and
-**recording-under-load moves earlier** (it shares E3's machinery and
-protects the raw-take promise before look-work begins amplifying GPU
-load). Tracked-body work stays late: nothing before phase 7 depends on it.
+Ordering note: the original roadmap made two justified changes to the goal's
+1→10 spine — replay before rendering and recording-under-load earlier. On
+2026-08-01 Caden approved a third change after accepting phase 3: establish
+the **tracked-body and capsule foundation before the remaining motion and
+particle aesthetics**. This proves those later operators against observed,
+hybrid, and inferred geometry while their contracts are still cheap to shape.
+The numbered capability names remain stable for history; active execution is
+phase 3 → tracked/capsule foundation from 7–8 → E6 → phases 4–6 → the remaining
+8 work. The governing detail is
+[plan-tracked-capsule-foundation.md](../plan-tracked-capsule-foundation.md).
 
 ## Phase 0 — Capture and calibration truth
 
@@ -94,20 +98,28 @@ and recoverable. *Non-goals:* new looks.
 
 ## Phase 7 — Tracked body signals
 
-*Entry:* E5 (and Caden's approval of the chosen provider). *Contains:*
-provider protocol + shm transport; skeleton ingestion with staleness
-display; bone-velocity term into the motion field; body-local particle
-frames; bone emitters.
-*Exit gate:* tracking dropout degrades aesthetically (release behavior),
-never crashes; skeleton term improves fast-swing response on golden take.
-*Non-goals:* any mesh fitting.
+*Entry:* E5 (and Caden's approval of the chosen provider). *Contains:* a
+provider-neutral observation contract; versioned bounded transport using the
+existing device JPEG (shared memory is now measurement-triggered, not the
+default); exact source-frame pairing; Kinect-metric lifting; observed/model
+provenance; One Euro filtering; acquisition/release hysteresis; staleness and
+failure display; fixed-capacity tracked-body and capsule contracts. The later
+phase-4 continuation adds the bone-velocity motion term, body-local particle
+frames, and bone emitters against this contract.
+*Current:* the provider, lift/filter/state logic, capsules, telemetry, and
+`observed` / `hybrid` / `inferred` compositor are implemented as of
+2026-08-01. The source-keyed frozen pose sidecar and live E6 run remain.
+*Exit gate:* tracking dropout degrades aesthetically (release/fallback), never
+crashes; live contention meets the E6 gate; the later skeleton term improves
+fast-swing response on the golden/body take. *Non-goals:* parametric mesh
+fitting.
 
 ## Phase 8 — Inferred-body experiment lane
 
-*Entry:* Phase 7 + E6 verdict. *Contains (conditional):* capsule-SDF
-completion volume; Magnetic Completion look; only if E6 says capsules are
-insufficient: low-Hz parametric fitter provider (license posture per
-[10](10-open-decisions.md)).
+*Entry:* Phase 7. *Contains:* the E6 frozen/live capsule judgment, then the
+capsule-SDF completion volume and Magnetic Completion look. Only if E6 says
+capsule geometry is insufficient: E6b and a low-Hz parametric fitter provider
+(license posture per [10](10-open-decisions.md)).
 *Exit gate:* Magnetic Completion accepted by Caden; measured/inferred
 visual vocabulary demonstrably readable. *Non-goals:* identity fidelity.
 

@@ -40,10 +40,12 @@ which is derived from these documents.
 - Whether hands tracking is live-viable or take-time-only → E5.
 - Capsules vs. parametric proxy for completion volume → E6 (and E6b for
   fitting runtime, only if triggered).
-- Model-weights/dataset license clearance for the chosen tracker
-  (MediaPipe/MMPose code is Apache; weights are not yet separately
-  cleared) → before roadmap phase 7 adoption. (Low stakes now given the
-  personal-use decision, but still checked before adoption.)
+- ~~Model-weights license clearance for the chosen tracker~~ **cleared
+  2026-08-01 for BlazePose GHUM 3D.** Google's model card explicitly lists
+  the Lite/Full/Heavy model artifacts under Apache-2.0. The immutable Lite v1
+  binary is checksum-verified during setup and remains unvendored. Dataset
+  composition and limitations remain recorded in the model card rather than
+  being inferred from the code license.
 - GL 4.6 vs. Vulkan: GL is the hypothesis; revisit only if E4 hits an
   API-shaped wall (not a taste decision).
 - Exact channel schema encodings inside MCAP → implementation ADR.

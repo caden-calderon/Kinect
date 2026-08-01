@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -29,7 +30,7 @@ constexpr int kColorHeight = 1080;
 /// but 08 §0's precise definition wins: 0.1 mm, 6.55 m range.)
 /// Validity is the value itself: 0 means the sensor returned nothing usable.
 struct DepthPlane {
-  std::array<uint16_t, kDepthWidth * kDepthHeight> dmm;
+  std::array<uint16_t, size_t(kDepthWidth) * kDepthHeight> dmm;
 
   static constexpr float kUnitsPerMm = 10.0f;
   static constexpr float kMaxMm = 6553.5f;
@@ -37,7 +38,7 @@ struct DepthPlane {
 
 /// IR plane: u16, sensor intensity right-shifted from float [0, 65535].
 struct IrPlane {
-  std::array<uint16_t, kDepthWidth * kDepthHeight> intensity;
+  std::array<uint16_t, size_t(kDepthWidth) * kDepthHeight> intensity;
 };
 
 /// Factory calibration, read from the device at open. Immutable, versioned

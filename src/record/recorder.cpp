@@ -328,6 +328,15 @@ bool TakeRecorder::start(std::shared_ptr<const CalibrationBlob> calib) {
   options.compression = impl_->config.zstd ? mcap::Compression::Zstd : mcap::Compression::None;
   impl_->writer.open(impl_->file, options);
 
+  auto fail_start = [&](const std::string& reason) {
+    std::fprintf(stderr, "[recorder] container setup failed: %s\n", reason.c_str());
+    impl_->journal.line("{\"event\":\"start_failed\",\"reason\":\"" + reason + "\"}");
+    impl_->journal.sync();
+    impl_->writer.close();
+    impl_->file.end();
+    return false;
+  };
+
   auto addChannel = [&](const char* topic, const char* schema_name, const char* encoding) {
     mcap::Schema schema(schema_name, "", "");
     impl_->writer.addSchema(schema);
@@ -339,6 +348,7 @@ bool TakeRecorder::start(std::shared_ptr<const CalibrationBlob> calib) {
   impl_->ir_ch = addChannel("/ir", "kstudio.ir.v1", "");
   impl_->color_ch = addChannel("/color_jpeg", "kstudio.color_jpeg.v1", "");
   impl_->event_ch = addChannel("/events", "kstudio.event.v1", "json");
+  if (impl_->file.failed()) return fail_start(impl_->file.reason());
 
   // Take header rides as MCAP metadata; calibration as first message on its
   // own channel (both also human-readable — see docs/take-format.md).
@@ -353,7 +363,9 @@ bool TakeRecorder::start(std::shared_ptr<const CalibrationBlob> calib) {
       {"device_serial", calib->device_serial},
       {"firmware", calib->firmware},
   };
-  impl_->writer.write(meta);
+  const mcap::Status metadata_status = impl_->writer.write(meta);
+  if (!metadata_status.ok() || impl_->file.failed())
+    return fail_start(impl_->file.failed() ? impl_->file.reason() : metadata_status.message);
 
   const uint64_t now = impl_->now();
   auto calib_json = calibrationJson(*calib);
@@ -362,7 +374,8 @@ bool TakeRecorder::start(std::shared_ptr<const CalibrationBlob> calib) {
     impl_->writer.addSchema(schema);
     mcap::Channel channel("/calibration", "json", schema.id);
     impl_->writer.addChannel(channel);
-    impl_->writeJson(channel.id, now, calib_json);
+    if (!impl_->writeJson(channel.id, now, calib_json))
+      return fail_start(impl_->file.failed() ? impl_->file.reason() : "calibration write error");
   }
 
   char buf[192];

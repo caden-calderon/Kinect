@@ -4,6 +4,8 @@
 //   kstudio --take <file.mcap>  replay (same pipeline, same controls)
 //   kstudio --plate <file>      explicitly load a scene background plate
 //   kstudio --camera-preview    start in the raw Kinect color view
+//   kstudio --geometry-mode M   observed, hybrid, or inferred
+//   kstudio --synthetic-body    deterministic capsule diagnostic (replay)
 //
 // Keys: Tab = clean output · C = Kinect camera/3D view · F = reset camera
 //       Space = play/pause (replay) · R = shader hot-reload
@@ -20,14 +22,18 @@
 #include <backends/imgui_impl_opengl3.h>
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "capture/depth_metrics.hpp"
@@ -40,11 +46,16 @@
 #include "record/recorder.hpp"
 #include "render/camera_motion.hpp"
 #include "render/camera_navigation.hpp"
+#include "render/capsule_pipeline.hpp"
 #include "render/mat4.hpp"
 #include "render/observed_pipeline.hpp"
 #include "render/post_chain.hpp"
 #include "render/subject_focus.hpp"
 #include "replay/replay_source.hpp"
+#include "track/body_tracker.hpp"
+#include "track/capsule_body.hpp"
+#include "track/diagnostic_body.hpp"
+#include "track/pose_provider.hpp"
 
 using namespace kstudio;
 
@@ -133,6 +144,25 @@ void drawParamsPanel(Parameters& params, bool automatic_subject_range) {
   ImGui::End();
 }
 
+std::optional<GeometryMode> parseGeometryMode(const char* name) {
+  if (!std::strcmp(name, "observed")) return GeometryMode::Observed;
+  if (!std::strcmp(name, "hybrid")) return GeometryMode::Hybrid;
+  if (!std::strcmp(name, "inferred")) return GeometryMode::Inferred;
+  return std::nullopt;
+}
+
+const char* trackingStateName(BodyTrackingState state) {
+  switch (state) {
+    case BodyTrackingState::Searching:
+      return "searching";
+    case BodyTrackingState::Tracking:
+      return "tracking";
+    case BodyTrackingState::Coasting:
+      return "coasting";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -140,8 +170,12 @@ int main(int argc, char** argv) {
   const char* preset_path = nullptr;
   const char* initial_plate_path = nullptr;
   const char* selftest_out = nullptr;  // screenshot after 45 captured frames, exit
-  bool record_flag = false;            // start a take immediately (gate testing)
+  uint64_t selftest_frames = 45;
+  const char* initial_geometry_mode = nullptr;
+  bool record_flag = false;  // start a take immediately (gate testing)
   bool start_color_preview = false;
+  bool disable_pose = false;
+  bool synthetic_body = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--take") && i + 1 < argc)
       take_path = argv[++i];
@@ -151,10 +185,28 @@ int main(int argc, char** argv) {
       initial_plate_path = argv[++i];
     else if (!std::strcmp(argv[i], "--selftest") && i + 1 < argc)
       selftest_out = argv[++i];
-    else if (!std::strcmp(argv[i], "--record"))
+    else if (!std::strcmp(argv[i], "--selftest-frames") && i + 1 < argc) {
+      char* end = nullptr;
+      const long parsed = std::strtol(argv[++i], &end, 10);
+      if (!end || *end != '\0' || parsed < 30 || parsed > 1'800) {
+        std::fprintf(stderr, "--selftest-frames must be between 30 and 1800\n");
+        return 2;
+      }
+      selftest_frames = uint64_t(parsed);
+    } else if (!std::strcmp(argv[i], "--record"))
       record_flag = true;
     else if (!std::strcmp(argv[i], "--camera-preview"))
       start_color_preview = true;
+    else if (!std::strcmp(argv[i], "--geometry-mode") && i + 1 < argc)
+      initial_geometry_mode = argv[++i];
+    else if (!std::strcmp(argv[i], "--no-pose"))
+      disable_pose = true;
+    else if (!std::strcmp(argv[i], "--synthetic-body"))
+      synthetic_body = true;
+  }
+  if (initial_geometry_mode && !parseGeometryMode(initial_geometry_mode)) {
+    std::fprintf(stderr, "invalid geometry mode: %s\n", initial_geometry_mode);
+    return 2;
   }
 
   glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);  // PRIME offload via GLX (see docs/build.md)
@@ -185,8 +237,10 @@ int main(int argc, char** argv) {
   Telemetry::Gauge& effective_far_mm = telemetry.gauge("geometry.effective_far_mm");
   Parameters params;
   ObservedPipeline observed;
+  CapsulePipeline capsules;
   PostChain post;
   observed.registerParams(params);
+  capsules.registerParams(params);
   post.registerParams(params);
   float* p_cam_auto_orbit = params.addFloat("camera", "auto_orbit", 0.0f, 0, 1);
   float* p_cam_idle_drift = params.addFloat("camera", "idle_drift", 0.35f, 0, 1);
@@ -196,7 +250,7 @@ int main(int argc, char** argv) {
   bool* p_flow_enabled = params.addBool("motion", "enabled", true);
   int* p_flow_preset = params.addEnum("motion", "preset", 1, {"ultrafast", "fast"});
 
-  if (!observed.init() || !post.init(kOutW, kOutH)) {
+  if (!observed.init() || !capsules.init() || !post.init(kOutW, kOutH)) {
     std::fprintf(stderr, "pipeline init failed (shaders?)\n");
     return 1;
   }
@@ -207,11 +261,15 @@ int main(int argc, char** argv) {
   flow_engine.start();
   TakeRecorder* recorder = nullptr;  // created per take
   std::unique_ptr<TakeRecorder> recorder_owned;
+  std::unique_ptr<PoseProvider> pose_provider;
+  bool provider_start_attempted = false;
+  if (!disable_pose && !synthetic_body) pose_provider = std::make_unique<PoseProvider>(telemetry);
 
   FrameAssembler::Sinks sinks;
   sinks.on_frame = [&](const RgbdFrame& f) {
     slot.publish(f);
     flow_engine.submit(f);
+    if (pose_provider) pose_provider->submit(f);
   };
   sinks.on_depth = [&](const DepthEvent& e) {
     if (recorder) recorder->submitDepth(e);
@@ -243,6 +301,21 @@ int main(int argc, char** argv) {
     calib = live->calibration();
   }
   observed.setCalibration(*calib);
+  BodyTracker body_tracker(*calib);
+  CapsuleBodyBuilder capsule_builder;
+  SubjectDepthTracker tracking_subject_tracker;
+  uint64_t last_body_update_ns = 0;
+  BodyTrackingState body_tracking_state = BodyTrackingState::Searching;
+  Telemetry::Gauge& body_confidence = telemetry.gauge("tracking.body_confidence");
+  Telemetry::Gauge& observed_joint_count = telemetry.gauge("tracking.observed_joints");
+  Telemetry::Gauge& inferred_joint_count = telemetry.gauge("tracking.inferred_joints");
+  if (synthetic_body) {
+    const TrackedBodyFrame body = diagnostics::makeTrackedBody();
+    capsules.setBody(capsule_builder.build(body));
+    body_tracking_state = body.state;
+    body_confidence.set(body.confidence);
+    last_body_update_ns = mono_now_ns();
+  }
 
   SceneTarget scene = makeSceneTarget(kOutW, kOutH);
   OrbitCamera camera;
@@ -311,6 +384,8 @@ int main(int argc, char** argv) {
 
   if (preset_path) applyPresetFile(preset_path);
   if (initial_plate_path) loadPlateFile();
+  if (initial_geometry_mode)
+    *capsules.p_geometry_mode = int(*parseGeometryMode(initial_geometry_mode));
 
   if (record_flag) {
     TakeRecorder::Config cfg;
@@ -325,6 +400,14 @@ int main(int argc, char** argv) {
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
+    // Preserve the zero-ML-cost observed baseline. Selecting a mode that
+    // consumes inferred geometry starts the provider once, on demand.
+    if (pose_provider && !provider_start_attempted &&
+        capsules.geometryMode() != GeometryMode::Observed) {
+      provider_start_attempted = true;
+      if (!pose_provider->start()) status_line = pose_provider->status().detail;
+    }
+
     // ---- input (keys handled after ImGui so it can capture typing) ----
     ImGuiIO& io = ImGui::GetIO();
     if (!io.WantCaptureKeyboard) {
@@ -333,7 +416,8 @@ int main(int argc, char** argv) {
       if (ImGui::IsKeyPressed(ImGuiKey_F, false)) resetCamera();
       if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) glfwSetWindowShouldClose(window, 1);
       if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
-        const bool ok = observed.reloadShaders() && post.reloadShaders();
+        const bool ok =
+            observed.reloadShaders() && capsules.reloadShaders() && post.reloadShaders();
         status_line = ok ? "shaders reloaded" : "shader reload FAILED (kept previous)";
       }
       if (replay && ImGui::IsKeyPressed(ImGuiKey_Space, false))
@@ -420,6 +504,36 @@ int main(int argc, char** argv) {
       observed.uploadFlow(*field);
       current_flow = field;  // holding the handle keeps its pool slot pinned
     }
+    if (pose_provider) {
+      if (auto sample = pose_provider->takeLatest(); sample && sample->source.depth) {
+        const NormalizedCrop crop{*observed.p_crop[0], *observed.p_crop[1], *observed.p_crop[2],
+                                  *observed.p_crop[3]};
+        const auto tracking_subject = tracking_subject_tracker.update(*sample->source.depth, crop);
+        const auto body = body_tracker.update(
+            sample->observation, *sample->source.depth,
+            tracking_subject ? std::optional<float>(tracking_subject->depth_mm) : std::nullopt);
+        body_tracking_state = body_tracker.state();
+        if (body) {
+          size_t observed_joints = 0;
+          size_t inferred_joints = 0;
+          for (const TrackedJoint& joint : body->joints) {
+            if (joint.source == JointPositionSource::ObservedDepth) ++observed_joints;
+            if (joint.source == JointPositionSource::ModelInferred) ++inferred_joints;
+          }
+          capsules.setBody(capsule_builder.build(*body));
+          body_confidence.set(body->confidence);
+          observed_joint_count.set(double(observed_joints));
+          inferred_joint_count.set(double(inferred_joints));
+          last_body_update_ns = mono_now_ns();
+        } else if (body_tracker.state() == BodyTrackingState::Searching) {
+          capsules.clearBody();
+          body_confidence.set(0.0);
+          observed_joint_count.set(0.0);
+          inferred_joint_count.set(0.0);
+          last_body_update_ns = 0;
+        }
+      }
+    }
 
     // ---- scene ----
     int win_w, win_h;
@@ -440,18 +554,32 @@ int main(int argc, char** argv) {
         Mat4::perspective(render_camera.fovy, float(kOutW) / kOutH, 0.05f, 30.0f) * view;
     const Mat4 world = Mat4::translate(0, *p_world_y, 0);
 
-    // depth-surface first (depth-tested, alpha), then points (additive)
+    constexpr uint64_t kBodyStaleNs = 500'000'000ull;
+    const uint64_t now_ns = mono_now_ns();
+    const bool body_healthy =
+        capsules.hasBody() && (synthetic_body || (last_body_update_ns != 0 &&
+                                                  now_ns - last_body_update_ns <= kBodyStaleNs));
+    const GeometryMode geometry_mode = capsules.geometryMode();
+    const bool draw_observed = geometry_mode != GeometryMode::Inferred || !body_healthy;
+
+    // Observed depth owns its pass. Capsules compose as a separate inferred
+    // layer and never replace or mutate the sensor textures.
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
-    observed.drawSurface(vp.m, world.m);
+    if (draw_observed) observed.drawSurface(vp.m, world.m);
+    if (body_healthy && geometry_mode != GeometryMode::Observed) {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+      capsules.draw(vp.m, world.m, geometry_mode);
+    }
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
     // Source-content index: stable across replay pacing and seeks (E7).
     const float jx = float((source_frame_index * 2654435761u) % 1000) / 1000.f - 0.5f;
     const float jy = float((source_frame_index * 40503u) % 1000) / 1000.f - 0.5f;
-    observed.drawPoints(vp.m, view.m, world.m, jx, jy);
+    if (draw_observed) observed.drawPoints(vp.m, view.m, world.m, jx, jy);
     glDepthMask(GL_TRUE);
     glDisable(GL_DEPTH_TEST);
 
@@ -463,10 +591,24 @@ int main(int argc, char** argv) {
       presentation_fbo = observed.colorPreviewFbo();
     }
 
-    if (selftest_out && fps_frames >= 45 && frame_counter > 30) {
+    if (selftest_out && fps_frames >= selftest_frames && frame_counter > 30) {
       screenshotPpm(selftest_out, presentation_fbo, kOutW, kOutH);
       std::printf("selftest screenshot: %s (%s) render_fps %.1f capture_fps %.1f\n", selftest_out,
                   status_line.c_str(), render_fps, capture_fps);
+      if (pose_provider) {
+        const PoseProvider::Status provider_status = pose_provider->status();
+        std::printf(
+            "pose provider: state %d completed %llu skipped %llu malformed %llu "
+            "inference %.2f ms age %.2f ms p95 %.2f ms%s%s\n",
+            int(provider_status.state), static_cast<unsigned long long>(provider_status.completed),
+            static_cast<unsigned long long>(provider_status.skipped),
+            static_cast<unsigned long long>(provider_status.malformed),
+            provider_status.inference_ms, provider_status.signal_age_ms,
+            provider_status.signal_age_p95_ms, provider_status.detail.empty() ? "" : " - ",
+            provider_status.detail.c_str());
+      }
+      std::printf("body: healthy %d state %s capsules %d\n", int(body_healthy),
+                  trackingStateName(body_tracking_state), int(capsules.hasBody()));
       glfwSetWindowShouldClose(window, 1);
     }
 
@@ -510,6 +652,19 @@ int main(int argc, char** argv) {
                     range.near_mm, range.far_mm);
       } else {
         ImGui::TextDisabled("subject depth not locked; manual clip fallback is active");
+      }
+      if (geometry_mode != GeometryMode::Observed) {
+        if (body_healthy) {
+          ImGui::Text("body %s | inferred layer active", trackingStateName(body_tracking_state));
+        } else {
+          ImGui::TextColored({1.0f, 0.65f, 0.2f, 1.0f},
+                             "inferred body unavailable; showing observed fallback");
+        }
+      }
+      if (pose_provider) {
+        const PoseProvider::Status provider_status = pose_provider->status();
+        if (provider_status.state == PoseProvider::State::Failed)
+          ImGui::TextColored({1.0f, 0.4f, 0.3f, 1.0f}, "%s", provider_status.detail.c_str());
       }
       ImGui::Separator();
       if (ImGui::Button("Luminous Shell")) applyPresetFile("presets/luminous-shell.json");
@@ -610,10 +765,10 @@ int main(int argc, char** argv) {
         const double age_ms =
             last_frame_host_ns ? double(mono_now_ns() - last_frame_host_ns) / 1e6 : -1;
         ImGui::Text("frame age %.0f ms", age_ms);
-        ImGui::Text("gpu: upload %.2f geom %.2f pts %.2f surf %.2f post %.2f ms",
+        ImGui::Text("gpu: upload %.2f geom %.2f pts %.2f surf %.2f body %.2f post %.2f ms",
                     observed.uploadTimer().latest_ms(), observed.geometryTimer().latest_ms(),
                     observed.pointsTimer().latest_ms(), observed.surfaceTimer().latest_ms(),
-                    post.timer().latest_ms());
+                    capsules.timer().latest_ms(), post.timer().latest_ms());
         if (recorder) ImGui::TextColored({1, 0.3f, 0.3f, 1}, "REC");
         for (const auto& s : telemetry.snapshot())
           if (s.value != 0) ImGui::Text("%s: %.0f", s.name.c_str(), s.value);
@@ -653,6 +808,7 @@ int main(int argc, char** argv) {
     live->stop();
     live->close();
   }
+  if (pose_provider) pose_provider->stop();
 
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();

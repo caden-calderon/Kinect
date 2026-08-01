@@ -12,7 +12,7 @@ direction (takes are ≤20 s animation clips; long soaks buy nothing).
 | [E3](E3.md) | MCAP under take load | **PASS** (5–6× real-time, seek p95 20 ms, kill-loss <1 s) + binding finding: stock FileWriter **aborts** on disk-full → recorder uses its own guarded writer |
 | [E4](E4.md) | combined-load render budget | **PASS** (217k pts + 250–500k particles + bloom @60 Hz with 30–43% headroom; 1M reachable at fp≤2; VRAM 3.6 GiB free; shedding ladder demonstrated) — **Option N stack fully gated-in with E1** |
 | [E5](E5.md) | live tracker reality | **PASS — closed 2026-07-30** (0 % swing dropout, sub-second reacquisition, graceful seated truncation) with two engineering conditions for the tracking layer: One Euro on end effectors (wrist σ 32 px raw), detection hysteresis at frame edges |
-| E6 | capsules vs parametric proxy | **NOT RUN** — requires E5's stability pass + Caden judging side-by-side (later session; harness direction in discovery 07) |
+| E6 | capsules vs parametric proxy | **HARNESS FOUNDATION IMPLEMENTED; JUDGMENT NOT RUN** — metric tracked-body contracts, capsules, three render modes, and deterministic synthetic GPU input landed 2026-08-01. A source-keyed frozen pose sidecar and Caden's live/frozen side-by-side verdict remain. |
 | [E7](E7.md) | deterministic replay | **PASS** — pixel-bit-identical across process restarts (SSIM ≡ 1.0); seek converges in K = one particle lifecycle (147 fr) after fixing a real design flaw → phase-5 rule: **lifecycle anchored to absolute frame index** |
 
 ## The with-Caden checklist (everything blocked on a human)
