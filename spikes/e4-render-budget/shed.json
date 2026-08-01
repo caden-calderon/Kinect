@@ -1,0 +1,11 @@
+renderer: NVIDIA T550 Laptop GPU/PCIe/SSE2
+[
+  {"footprint": 8, "particles": 1000000, "frames": 700,
+    "cpu_frame_ms": {"p50": 9.45, "p95": 24.63, "p99": 25.65},
+    "upload_ms": {"p50": 2.47, "p95": 5.92, "p99": 6.57},
+    "points_ms": {"p50": 0.30, "p95": 1.84, "p99": 1.92},
+    "particle_sim_ms": {"p50": 0.76, "p95": 0.77, "p99": 0.77},
+    "particle_draw_ms": {"p50": 5.29, "p95": 13.65, "p99": 14.03},
+    "bloom_ms": {"p50": 0.53, "p95": 0.59, "p99": 0.61},
+    "vram_used_mb": 462, "vram_free_mb": 3634, "rss_mb": 392, "vmhwm_mb": 395}
+]

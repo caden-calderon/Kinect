@@ -1,0 +1,43 @@
+# Build outputs
+/build/
+/target/
+/dist/
+/out/
+spikes/*/build/
+spikes/*/out*/
+/spikes/e5-tracker-probe/models/*.task
+
+# Vendored checkouts (recreated by scripts/bootstrap-fork.sh)
+/third_party/
+
+# Takes are local-only (privacy: raw RGB of people is never committed)
+/takes/
+
+# Language and package-manager state
+/node_modules/
+/.venv/
+/venv/
+__pycache__/
+*.py[cod]
+
+# Local runtime data
+/recordings/
+/captures/
+/artifacts/
+/logs/
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and OS state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+
+# App state
+imgui.ini

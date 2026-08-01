@@ -1,0 +1,631 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Caden-Calderon <caden.calderon03@gmail.com>
+Date: Wed, 29 Jul 2026 18:16:02 -0600
+Subject: [PATCH 1/2] kinect-studio: modern toolchain fixes + JPEG tee color
+ processor
+
+- CMake >=3.16 minimums (CMake 4.x compat); GLVND OpenGL linking
+- Pin CL_TARGET_OPENCL_VERSION=120 for current Khronos headers;
+  guard CL_ICDL_VERSION macro clash in both OpenCL depth processors
+- Export LIBFREENECT2_WITH_TURBOJPEG_SUPPORT in public config.h
+- New TeeJpegRgbPacketProcessor + TeeColorFrame: per color frame,
+  deliver decoded BGRX AND the untouched device JPEG bytes from a
+  fixed refcounted pool (drop-with-count on exhaustion, never blocks)
+- Tee pipeline variants: TeeCpuPacketPipeline, TeeOpenGLPacketPipeline,
+  TeeOpenCLPacketPipeline, each exposing teeStats()
+---
+ CMakeLists.txt                                |   9 +-
+ examples/CMakeLists.txt                       |   2 +-
+ .../libfreenect2/rgb_packet_processor.h       |  21 ++
+ include/libfreenect2/config.h.in              |   2 +
+ include/libfreenect2/packet_pipeline.h        |  41 +++
+ include/libfreenect2/tee_color_frame.h        |  75 +++++
+ src/opencl_depth_packet_processor.cpp         |   4 +-
+ src/opencl_kde_depth_packet_processor.cpp     |   4 +-
+ src/packet_pipeline.cpp                       |  48 ++++
+ src/tee_jpeg_rgb_packet_processor.cpp         | 266 ++++++++++++++++++
+ 10 files changed, 468 insertions(+), 4 deletions(-)
+ create mode 100644 include/libfreenect2/tee_color_frame.h
+ create mode 100644 src/tee_jpeg_rgb_packet_processor.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d8ef047..f096990 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-CMAKE_MINIMUM_REQUIRED(VERSION 2.8.12.1)
++CMAKE_MINIMUM_REQUIRED(VERSION 3.16)
+ 
+ SET(PROJECT_VER_MAJOR 0)
+ SET(PROJECT_VER_MINOR 2)
+@@ -252,6 +252,7 @@ IF(TurboJPEG_FOUND)
+ 
+   LIST(APPEND SOURCES
+     src/turbo_jpeg_rgb_packet_processor.cpp
++    src/tee_jpeg_rgb_packet_processor.cpp
+   )
+ 
+   LIST(APPEND LIBRARIES
+@@ -266,6 +267,7 @@ ENDIF()
+ SET(HAVE_OpenGL disabled)
+ IF(ENABLE_OPENGL)
+   FIND_PACKAGE(GLFW3)
++  SET(OpenGL_GL_PREFERENCE GLVND)
+   FIND_PACKAGE(OpenGL)
+   SET(HAVE_OpenGL no)
+   IF(GLFW3_FOUND AND OPENGL_FOUND)
+@@ -278,6 +280,7 @@ IF(ENABLE_OPENGL)
+     LIST(APPEND LIBRARIES
+       ${GLFW3_LIBRARIES}
+       ${OPENGL_gl_LIBRARY}
++      ${OPENGL_LIBRARIES}
+     )
+     LIST(APPEND SOURCES
+       src/flextGL.cpp
+@@ -304,6 +307,10 @@ IF(ENABLE_OPENCL)
+     SET(LIBFREENECT2_WITH_OPENCL_SUPPORT 1)
+     SET(HAVE_OpenCL yes)
+ 
++    # Pin the OpenCL API target for modern Khronos headers; the bundled
++    # cl.hpp wrapper uses OpenCL 1.2-era entry points.
++    ADD_DEFINITIONS(-DCL_TARGET_OPENCL_VERSION=120 -DCL_USE_DEPRECATED_OPENCL_1_2_APIS)
++
+     IF(UNIX AND NOT APPLE)
+       INCLUDE(CheckOpenCLICDLoader)
+       IF(OpenCL_C_WORKS AND NOT OpenCL_CXX_WORKS)
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index 8741f67..beb0833 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-CMAKE_MINIMUM_REQUIRED(VERSION 2.8.12.1)
++CMAKE_MINIMUM_REQUIRED(VERSION 3.16)
+ 
+ if(WIN32 AND NOT MINGW)
+   if(NOT DEFINED CMAKE_DEBUG_POSTFIX)
+diff --git a/include/internal/libfreenect2/rgb_packet_processor.h b/include/internal/libfreenect2/rgb_packet_processor.h
+index 5974a61..5469d62 100644
+--- a/include/internal/libfreenect2/rgb_packet_processor.h
++++ b/include/internal/libfreenect2/rgb_packet_processor.h
+@@ -35,6 +35,7 @@
+ #include <libfreenect2/config.h>
+ #include <libfreenect2/frame_listener.hpp>
+ #include <libfreenect2/packet_processor.h>
++#include <libfreenect2/tee_color_frame.h>
+ 
+ namespace libfreenect2
+ {
+@@ -93,6 +94,26 @@ private:
+ };
+ #endif
+ 
++#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++class TeeJpegRgbPacketProcessorImpl;
++
++/** Kinect Creative Studio fork: decodes JPEG via TurboJPEG *and* retains the
++ * compressed device bytes, publishing both through pooled TeeColorFrame
++ * objects (see libfreenect2/tee_color_frame.h). */
++class TeeJpegRgbPacketProcessor : public RgbPacketProcessor
++{
++public:
++  explicit TeeJpegRgbPacketProcessor(size_t pool_size = 8);
++  virtual ~TeeJpegRgbPacketProcessor();
++  virtual void process(const libfreenect2::RgbPacket &packet);
++  virtual const char *name() { return "TeeTurboJPEG"; }
++
++  TeeStats teeStats() const;
++private:
++  TeeJpegRgbPacketProcessorImpl *impl_;
++};
++#endif
++
+ #ifdef LIBFREENECT2_WITH_VT_SUPPORT
+ class VTRgbPacketProcessorImpl;
+ 
+diff --git a/include/libfreenect2/config.h.in b/include/libfreenect2/config.h.in
+index 35a0f63..f90469d 100644
+--- a/include/libfreenect2/config.h.in
++++ b/include/libfreenect2/config.h.in
+@@ -46,6 +46,8 @@
+ 
+ #cmakedefine LIBFREENECT2_WITH_CUDA_SUPPORT
+ 
++#cmakedefine LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++
+ #cmakedefine LIBFREENECT2_WITH_VT_SUPPORT
+ 
+ #cmakedefine LIBFREENECT2_WITH_VAAPI_SUPPORT
+diff --git a/include/libfreenect2/packet_pipeline.h b/include/libfreenect2/packet_pipeline.h
+index 08d6540..cf97272 100644
+--- a/include/libfreenect2/packet_pipeline.h
++++ b/include/libfreenect2/packet_pipeline.h
+@@ -90,6 +90,47 @@ public:
+   virtual ~CpuPacketPipeline();
+ };
+ 
++#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++struct TeeStats;
++
++/** Kinect Creative Studio fork: pipelines whose color path is the JPEG tee —
++ * every color frame is a TeeColorFrame carrying both the decoded image and
++ * the device's compressed JPEG bytes. Depth processing varies per class. */
++class LIBFREENECT2_API TeeCpuPacketPipeline : public PacketPipeline
++{
++public:
++  explicit TeeCpuPacketPipeline(size_t tee_pool_size = 8);
++  virtual ~TeeCpuPacketPipeline();
++  TeeStats teeStats() const;
++};
++
++#ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
++class LIBFREENECT2_API TeeOpenGLPacketPipeline : public PacketPipeline
++{
++protected:
++  void *parent_opengl_context_;
++public:
++  explicit TeeOpenGLPacketPipeline(void *parent_opengl_context = 0,
++                                   size_t tee_pool_size = 8);
++  virtual ~TeeOpenGLPacketPipeline();
++  TeeStats teeStats() const;
++};
++#endif
++
++#ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
++class LIBFREENECT2_API TeeOpenCLPacketPipeline : public PacketPipeline
++{
++protected:
++  const int deviceId;
++public:
++  explicit TeeOpenCLPacketPipeline(const int deviceId = -1,
++                                   size_t tee_pool_size = 8);
++  virtual ~TeeOpenCLPacketPipeline();
++  TeeStats teeStats() const;
++};
++#endif
++#endif // LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++
+ #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
+ /** Pipeline with OpenGL depth processing. */
+ class LIBFREENECT2_API OpenGLPacketPipeline : public PacketPipeline
+diff --git a/include/libfreenect2/tee_color_frame.h b/include/libfreenect2/tee_color_frame.h
+new file mode 100644
+index 0000000..fbaa136
+--- /dev/null
++++ b/include/libfreenect2/tee_color_frame.h
+@@ -0,0 +1,75 @@
++/*
++ * This file is part of the Kinect Creative Studio fork of libfreenect2.
++ *
++ * Copyright (c) 2014 individual OpenKinect contributors. See the CONTRIB file
++ * for details.
++ *
++ * This code is licensed to you under the terms of the Apache License, version
++ * 2.0, or, at your option, the terms of the GNU General Public License,
++ * version 2.0. See the APACHE20 and GPL2 files for the text of the licenses,
++ * or the following URLs:
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * http://www.gnu.org/licenses/gpl-2.0.txt
++ */
++
++/** @file tee_color_frame.h
++ * Color frame that carries both the decoded image and the device's own
++ * compressed JPEG bytes ("the tee"). Frames come from a fixed pool owned
++ * by the tee processor; deleting the frame returns its buffers to the
++ * pool. See the Kinect Creative Studio fork notes for rationale.
++ */
++
++#ifndef TEE_COLOR_FRAME_H_
++#define TEE_COLOR_FRAME_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <libfreenect2/config.h>
++#include <libfreenect2/frame_listener.hpp>
++
++namespace libfreenect2
++{
++
++class TeeFramePool;
++
++/** Counters published by the tee processor. All failure modes are counted,
++ * never silent: a frame is either delivered with both products or dropped
++ * with the reason recorded here. */
++struct LIBFREENECT2_API TeeStats
++{
++  uint64_t delivered;              ///< frames delivered with decoded image + JPEG bytes
++  uint64_t dropped_pool_exhausted; ///< consumer held all pool slots; frame dropped
++  uint64_t dropped_jpeg_too_large; ///< device JPEG exceeded the slot capacity; frame dropped
++  uint64_t decode_errors;          ///< TurboJPEG decode failed; frame dropped
++};
++
++/** A decoded color frame that also owns a copy of the device JPEG bytes.
++ *
++ * Lifetime: produced only by the tee processor's fixed pool. The listener
++ * takes ownership per the usual libfreenect2 contract; `delete` returns the
++ * slot to the pool (the pool itself is kept alive by shared ownership, so
++ * frames may safely outlive the processor).
++ */
++class LIBFREENECT2_API TeeColorFrame : public Frame
++{
++public:
++  virtual ~TeeColorFrame();
++
++  /** Device JPEG bytes exactly as received from the sensor. */
++  const unsigned char *jpegData() const { return jpeg_data_; }
++  size_t jpegLength() const { return jpeg_length_; }
++
++private:
++  friend class TeeFramePool;
++  TeeColorFrame(size_t width, size_t height, size_t bytes_per_pixel,
++                unsigned char *pixels);
++
++  unsigned char *jpeg_data_;
++  size_t jpeg_length_;
++  TeeFramePool *pool_; ///< owning pool; refcounted via pool-internal count
++  size_t slot_;
++};
++
++} /* namespace libfreenect2 */
++#endif /* TEE_COLOR_FRAME_H_ */
+diff --git a/src/opencl_depth_packet_processor.cpp b/src/opencl_depth_packet_processor.cpp
+index d8db14d..5ddc926 100644
+--- a/src/opencl_depth_packet_processor.cpp
++++ b/src/opencl_depth_packet_processor.cpp
+@@ -251,7 +251,9 @@ public:
+     newIrFrame();
+     newDepthFrame();
+ 
+-    const int CL_ICDL_VERSION = 2;
++#ifndef CL_ICDL_VERSION
++#define CL_ICDL_VERSION 2
++#endif
+     typedef cl_int (*icdloader_func)(int, size_t, void*, size_t*);
+ #ifdef _MSC_VER
+ #pragma warning(push)
+diff --git a/src/opencl_kde_depth_packet_processor.cpp b/src/opencl_kde_depth_packet_processor.cpp
+index 98dbdff..213e8b6 100644
+--- a/src/opencl_kde_depth_packet_processor.cpp
++++ b/src/opencl_kde_depth_packet_processor.cpp
+@@ -259,7 +259,9 @@ public:
+     newIrFrame();
+     newDepthFrame();
+ 
+-    const int CL_ICDL_VERSION = 2;
++#ifndef CL_ICDL_VERSION
++#define CL_ICDL_VERSION 2
++#endif
+     typedef cl_int (*icdloader_func)(int, size_t, void*, size_t*);
+ #ifdef _MSC_VER
+ #pragma warning(push)
+diff --git a/src/packet_pipeline.cpp b/src/packet_pipeline.cpp
+index e5d7ca3..0c43320 100644
+--- a/src/packet_pipeline.cpp
++++ b/src/packet_pipeline.cpp
+@@ -135,6 +135,54 @@ CpuPacketPipeline::CpuPacketPipeline()
+ 
+ CpuPacketPipeline::~CpuPacketPipeline() { }
+ 
++#ifdef LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++// Kinect Creative Studio fork: tee pipelines. The rgb processor is always
++// TeeJpegRgbPacketProcessor, so the stats casts below are safe by
++// construction.
++static TeeStats getTeeStatsOf(const PacketPipelineComponents *comp)
++{
++  return static_cast<TeeJpegRgbPacketProcessor *>(comp->rgb_processor_)->teeStats();
++}
++
++TeeCpuPacketPipeline::TeeCpuPacketPipeline(size_t tee_pool_size)
++{
++  comp_->initialize(new TeeJpegRgbPacketProcessor(tee_pool_size),
++                    new CpuDepthPacketProcessor());
++}
++
++TeeCpuPacketPipeline::~TeeCpuPacketPipeline() { }
++
++TeeStats TeeCpuPacketPipeline::teeStats() const { return getTeeStatsOf(comp_); }
++
++#ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
++TeeOpenGLPacketPipeline::TeeOpenGLPacketPipeline(void *parent_opengl_context,
++                                                 size_t tee_pool_size) :
++  parent_opengl_context_(parent_opengl_context)
++{
++  comp_->initialize(new TeeJpegRgbPacketProcessor(tee_pool_size),
++                    new OpenGLDepthPacketProcessor(parent_opengl_context_, false));
++}
++
++TeeOpenGLPacketPipeline::~TeeOpenGLPacketPipeline() { }
++
++TeeStats TeeOpenGLPacketPipeline::teeStats() const { return getTeeStatsOf(comp_); }
++#endif // LIBFREENECT2_WITH_OPENGL_SUPPORT
++
++#ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
++TeeOpenCLPacketPipeline::TeeOpenCLPacketPipeline(const int deviceId,
++                                                 size_t tee_pool_size) :
++  deviceId(deviceId)
++{
++  comp_->initialize(new TeeJpegRgbPacketProcessor(tee_pool_size),
++                    new OpenCLDepthPacketProcessor(deviceId));
++}
++
++TeeOpenCLPacketPipeline::~TeeOpenCLPacketPipeline() { }
++
++TeeStats TeeOpenCLPacketPipeline::teeStats() const { return getTeeStatsOf(comp_); }
++#endif // LIBFREENECT2_WITH_OPENCL_SUPPORT
++#endif // LIBFREENECT2_WITH_TURBOJPEG_SUPPORT
++
+ #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
+ OpenGLPacketPipeline::OpenGLPacketPipeline(void *parent_opengl_context, bool debug) : parent_opengl_context_(parent_opengl_context), debug_(debug)
+ {
+diff --git a/src/tee_jpeg_rgb_packet_processor.cpp b/src/tee_jpeg_rgb_packet_processor.cpp
+new file mode 100644
+index 0000000..0c2bd81
+--- /dev/null
++++ b/src/tee_jpeg_rgb_packet_processor.cpp
+@@ -0,0 +1,266 @@
++/*
++ * This file is part of the Kinect Creative Studio fork of libfreenect2.
++ *
++ * Copyright (c) 2014 individual OpenKinect contributors. See the CONTRIB file
++ * for details.
++ *
++ * This code is licensed to you under the terms of the Apache License, version
++ * 2.0, or, at your option, the terms of the GNU General Public License,
++ * version 2.0. See the APACHE20 and GPL2 files for the text of the licenses,
++ * or the following URLs:
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * http://www.gnu.org/licenses/gpl-2.0.txt
++ */
++
++/** @file tee_jpeg_rgb_packet_processor.cpp
++ * The color tee: per packet, retain the device JPEG bytes AND decode them
++ * with TurboJPEG, publishing both through one pooled TeeColorFrame.
++ *
++ * Discipline (per the studio architecture): fixed pool, no steady-state
++ * allocation, pool exhaustion drops the frame with a counted event and
++ * never blocks the packet thread.
++ */
++
++#include <libfreenect2/rgb_packet_processor.h>
++#include <libfreenect2/tee_color_frame.h>
++#include <libfreenect2/logging.h>
++#include <libfreenect2/threading.h>
++
++#include <turbojpeg.h>
++
++#include <atomic>
++#include <cstring>
++#include <vector>
++
++namespace libfreenect2
++{
++
++/** Fixed pool of frame slots, shared between the processor and the frames
++ * it has published. Refcounted so frames may outlive the processor. */
++class TeeFramePool
++{
++public:
++  static const size_t kColorWidth = 1920;
++  static const size_t kColorHeight = 1080;
++  static const size_t kBytesPerPixel = 4; // BGRX
++  static const size_t kJpegCapacity = 2 * 1024 * 1024;
++
++  explicit TeeFramePool(size_t slot_count) :
++    refcount_(1),
++    slots_(slot_count)
++  {
++    for (size_t i = 0; i < slots_.size(); ++i)
++    {
++      slots_[i].pixels = new unsigned char[kColorWidth * kColorHeight * kBytesPerPixel];
++      slots_[i].jpeg = new unsigned char[kJpegCapacity];
++      slots_[i].in_use = false;
++    }
++  }
++
++  void addRef()
++  {
++    refcount_.fetch_add(1, std::memory_order_relaxed);
++  }
++
++  void release()
++  {
++    if (refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1)
++      delete this;
++  }
++
++  /** Acquire a free slot, or SIZE_MAX if the pool is exhausted. Never blocks
++   * beyond the freelist mutex (held only for the flag flip). */
++  size_t acquire()
++  {
++    libfreenect2::lock_guard guard(mutex_);
++    for (size_t i = 0; i < slots_.size(); ++i)
++    {
++      if (!slots_[i].in_use)
++      {
++        slots_[i].in_use = true;
++        return i;
++      }
++    }
++    return SIZE_MAX;
++  }
++
++  void releaseSlot(size_t index)
++  {
++    libfreenect2::lock_guard guard(mutex_);
++    slots_[index].in_use = false;
++  }
++
++  unsigned char *pixels(size_t index) { return slots_[index].pixels; }
++  unsigned char *jpeg(size_t index) { return slots_[index].jpeg; }
++
++  /** Construct a frame on an acquired slot; the frame carries one pool ref. */
++  TeeColorFrame *makeFrame(size_t index, size_t jpeg_length)
++  {
++    TeeColorFrame *frame =
++        new TeeColorFrame(kColorWidth, kColorHeight, kBytesPerPixel, slots_[index].pixels);
++    frame->jpeg_data_ = slots_[index].jpeg;
++    frame->jpeg_length_ = jpeg_length;
++    frame->pool_ = this;
++    frame->slot_ = index;
++    addRef();
++    return frame;
++  }
++
++private:
++  ~TeeFramePool()
++  {
++    for (size_t i = 0; i < slots_.size(); ++i)
++    {
++      delete[] slots_[i].pixels;
++      delete[] slots_[i].jpeg;
++    }
++  }
++
++  struct Slot
++  {
++    unsigned char *pixels;
++    unsigned char *jpeg;
++    bool in_use;
++  };
++
++  std::atomic<uint64_t> refcount_;
++  std::vector<Slot> slots_;
++  libfreenect2::mutex mutex_;
++};
++
++TeeColorFrame::TeeColorFrame(size_t width, size_t height, size_t bytes_per_pixel,
++                             unsigned char *pixels) :
++  Frame(width, height, bytes_per_pixel, pixels),
++  jpeg_data_(NULL),
++  jpeg_length_(0),
++  pool_(NULL),
++  slot_(0)
++{
++}
++
++TeeColorFrame::~TeeColorFrame()
++{
++  if (pool_ != NULL)
++  {
++    pool_->releaseSlot(slot_);
++    pool_->release();
++  }
++}
++
++class TeeJpegRgbPacketProcessorImpl : public WithPerfLogging
++{
++public:
++  tjhandle decompressor;
++  TeeFramePool *pool;
++
++  std::atomic<uint64_t> delivered;
++  std::atomic<uint64_t> dropped_pool_exhausted;
++  std::atomic<uint64_t> dropped_jpeg_too_large;
++  std::atomic<uint64_t> decode_errors;
++
++  explicit TeeJpegRgbPacketProcessorImpl(size_t pool_size) :
++    delivered(0),
++    dropped_pool_exhausted(0),
++    dropped_jpeg_too_large(0),
++    decode_errors(0)
++  {
++    decompressor = tjInitDecompress();
++    if (decompressor == 0)
++    {
++      LOG_ERROR << "Failed to initialize TurboJPEG decompressor! TurboJPEG error: '"
++                << tjGetErrorStr() << "'";
++    }
++    pool = new TeeFramePool(pool_size);
++  }
++
++  ~TeeJpegRgbPacketProcessorImpl()
++  {
++    pool->release();
++    if (decompressor != 0)
++    {
++      if (tjDestroy(decompressor) == -1)
++      {
++        LOG_ERROR << "Failed to destroy TurboJPEG decompressor! TurboJPEG error: '"
++                  << tjGetErrorStr() << "'";
++      }
++    }
++  }
++};
++
++TeeJpegRgbPacketProcessor::TeeJpegRgbPacketProcessor(size_t pool_size) :
++  impl_(new TeeJpegRgbPacketProcessorImpl(pool_size))
++{
++}
++
++TeeJpegRgbPacketProcessor::~TeeJpegRgbPacketProcessor()
++{
++  delete impl_;
++}
++
++TeeStats TeeJpegRgbPacketProcessor::teeStats() const
++{
++  TeeStats stats;
++  stats.delivered = impl_->delivered.load(std::memory_order_relaxed);
++  stats.dropped_pool_exhausted = impl_->dropped_pool_exhausted.load(std::memory_order_relaxed);
++  stats.dropped_jpeg_too_large = impl_->dropped_jpeg_too_large.load(std::memory_order_relaxed);
++  stats.decode_errors = impl_->decode_errors.load(std::memory_order_relaxed);
++  return stats;
++}
++
++void TeeJpegRgbPacketProcessor::process(const RgbPacket &packet)
++{
++  if (impl_->decompressor == 0 || listener_ == 0)
++    return;
++
++  if (packet.jpeg_buffer_length > TeeFramePool::kJpegCapacity)
++  {
++    impl_->dropped_jpeg_too_large.fetch_add(1, std::memory_order_relaxed);
++    LOG_WARNING << "device JPEG (" << packet.jpeg_buffer_length
++                << " bytes) exceeds tee slot capacity; frame dropped";
++    return;
++  }
++
++  size_t slot = impl_->pool->acquire();
++  if (slot == SIZE_MAX)
++  {
++    impl_->dropped_pool_exhausted.fetch_add(1, std::memory_order_relaxed);
++    return;
++  }
++
++  impl_->startTiming();
++
++  std::memcpy(impl_->pool->jpeg(slot), packet.jpeg_buffer, packet.jpeg_buffer_length);
++
++  int r = tjDecompress2(impl_->decompressor, packet.jpeg_buffer, packet.jpeg_buffer_length,
++                        impl_->pool->pixels(slot), TeeFramePool::kColorWidth,
++                        TeeFramePool::kColorWidth * TeeFramePool::kBytesPerPixel,
++                        TeeFramePool::kColorHeight, TJPF_BGRX, 0);
++
++  impl_->stopTiming(LOG_INFO);
++
++  if (r != 0)
++  {
++    impl_->decode_errors.fetch_add(1, std::memory_order_relaxed);
++    impl_->pool->releaseSlot(slot);
++    LOG_ERROR << "Failed to decompress rgb image! TurboJPEG error: '" << tjGetErrorStr() << "'";
++    return;
++  }
++
++  TeeColorFrame *frame = impl_->pool->makeFrame(slot, packet.jpeg_buffer_length);
++  frame->timestamp = packet.timestamp;
++  frame->sequence = packet.sequence;
++  frame->exposure = packet.exposure;
++  frame->gain = packet.gain;
++  frame->gamma = packet.gamma;
++  frame->format = Frame::BGRX;
++
++  impl_->delivered.fetch_add(1, std::memory_order_relaxed);
++
++  if (!listener_->onNewFrame(Frame::Color, frame))
++  {
++    // Listener declined ownership; recycle immediately.
++    delete frame;
++  }
++}
++
++} /* namespace libfreenect2 */

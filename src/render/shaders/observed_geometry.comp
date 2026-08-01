@@ -1,0 +1,148 @@
+#version 460
+// Observed-layer geometry pass: unproject the depth raster with factory
+// intrinsics; estimate normals from depth-space neighbors; build the
+// boundary/confidence map (discontinuity + IR intensity — the confidence
+// proxy grounded by E1's silhouette analysis).
+//
+// Outputs (all depth_raster, 512x424):
+//   position_out: xyz = depth_cam meters (right-handed, -Z forward), w = valid
+//   normal_out:   xyz = normal, w = confidence 0..1
+//   boundary_out: r = discontinuity 0..1, g = IR-based confidence 0..1
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform usampler2D depth_tex;  // u16 0.1mm, 0 invalid
+layout(binding = 1) uniform usampler2D ir_tex;     // u16 intensity
+layout(binding = 2) uniform usampler2D background_plate_tex;  // u16 0.1mm, 0 unknown
+layout(rgba32f, binding = 0) uniform writeonly image2D position_out;
+layout(rgba16f, binding = 1) uniform writeonly image2D normal_out;
+layout(rg16f, binding = 2) uniform writeonly image2D boundary_out;
+layout(rg16f, binding = 3) uniform writeonly image2D coloruv_out;
+layout(std430, binding = 0) buffer CentroidSums {
+  int centroid_sum_x_mm;
+  int centroid_sum_y_mm;
+  int centroid_sum_z_mm;
+  uint centroid_count;
+};
+
+uniform vec4 intr;               // depth fx fy cx cy
+uniform vec4 depth_k;            // k1 k2 k3 unused
+uniform vec2 depth_p;            // p1 p2
+uniform vec4 color_intr;         // color fx cx cy shift_d
+uniform float color_shift_m;
+uniform float mx_c[10];          // x3y0 x0y3 x2y1 x1y2 x2y0 x0y2 x1y1 x1y0 x0y1 x0y0
+uniform float my_c[10];
+uniform float edge_mm;           // discontinuity threshold (mm)
+uniform vec2 clip_mm;            // near/far clip in mm
+uniform int speckle_min_neighbors;
+uniform bool background_removal;
+uniform float background_epsilon_mm;
+uniform vec4 centroid_crop;       // visible u0 v0 u1 v1
+
+// libfreenect2 registration math (fork src/registration.cpp), evaluated
+// per-pixel: distort the ideal grid coord, then the depth->color polynomial.
+vec2 registeredColorPx(ivec2 uv, float z_mm) {
+  const float depth_q = 0.01, color_q = 0.002199;
+  float dx = (float(uv.x) - intr.z) / intr.x;
+  float dy = (float(uv.y) - intr.w) / intr.y;
+  float r2 = dx * dx + dy * dy;
+  float kr = 1.0 + ((depth_k.z * r2 + depth_k.y) * r2 + depth_k.x) * r2;
+  float mxp = intr.x * (dx * kr + depth_p.y * (r2 + 2.0 * dx * dx) + depth_p.x * 2.0 * dx * dy) + intr.z;
+  float myp = intr.y * (dy * kr + depth_p.x * (r2 + 2.0 * dy * dy) + depth_p.y * 2.0 * dx * dy) + intr.w;
+
+  float mx = (mxp - intr.z) * depth_q;
+  float my = (myp - intr.w) * depth_q;
+  float wx = (mx*mx*mx*mx_c[0]) + (my*my*my*mx_c[1]) + (mx*mx*my*mx_c[2]) + (my*my*mx*mx_c[3]) +
+             (mx*mx*mx_c[4]) + (my*my*mx_c[5]) + (mx*my*mx_c[6]) + (mx*mx_c[7]) + (my*mx_c[8]) + mx_c[9];
+  float wy = (mx*mx*mx*my_c[0]) + (my*my*my*my_c[1]) + (mx*mx*my*my_c[2]) + (my*my*mx*my_c[3]) +
+             (mx*mx*my_c[4]) + (my*my*my_c[5]) + (mx*my*my_c[6]) + (mx*my_c[7]) + (my*my_c[8]) + my_c[9];
+  float rx = (wx / (color_intr.x * color_q)) - (color_shift_m / color_intr.w);
+  float ry = (wy / color_q) + color_intr.z;
+  float cx_px = (rx + color_shift_m / z_mm) * color_intr.x + color_intr.y;
+  return vec2(cx_px / 1920.0, ry / 1080.0);
+}
+
+vec3 unproject(ivec2 uv, float z_m) {
+  return vec3((float(uv.x) - intr.z) / intr.x * z_m,
+              -(float(uv.y) - intr.w) / intr.y * z_m, -z_m);
+}
+
+float depthMmAt(ivec2 uv) {
+  uv = clamp(uv, ivec2(0), ivec2(511, 423));
+  uint depth_dmm = texelFetch(depth_tex, uv, 0).r;
+  if (background_removal && depth_dmm != 0u) {
+    uint plate_dmm = texelFetch(background_plate_tex, uv, 0).r;
+    int delta_dmm = abs(int(depth_dmm) - int(plate_dmm));
+    if (plate_dmm != 0u && float(delta_dmm) < background_epsilon_mm * 10.0) return 0.0;
+  }
+  return float(depth_dmm) * 0.1;
+}
+
+void main() {
+  ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
+  if (uv.x >= 512 || uv.y >= 424) return;
+
+  float d = depthMmAt(uv);
+  bool valid = d > 0.0 && d >= clip_mm.x && d <= clip_mm.y;
+  if (valid && speckle_min_neighbors > 0) {
+    int coherent_neighbors = 0;
+    for (int oy = -1; oy <= 1; ++oy) {
+      for (int ox = -1; ox <= 1; ++ox) {
+        if (ox == 0 && oy == 0) continue;
+        float neighbor_depth = depthMmAt(uv + ivec2(ox, oy));
+        if (neighbor_depth > 0.0 && abs(neighbor_depth - d) <= edge_mm)
+          ++coherent_neighbors;
+      }
+    }
+    valid = coherent_neighbors >= speckle_min_neighbors;
+  }
+  if (!valid) {
+    imageStore(position_out, uv, vec4(0, 0, 0, 0));
+    imageStore(normal_out, uv, vec4(0, 0, 1, 0));
+    imageStore(boundary_out, uv, vec4(0, 0, 0, 0));
+    imageStore(coloruv_out, uv, vec4(0, 0, 0, 0));
+    return;
+  }
+
+  float z = d * 0.001;
+  vec3 p = unproject(uv, z);
+
+  vec2 raster_uv = (vec2(uv) + 0.5) / vec2(512.0, 424.0);
+  bool in_centroid_crop = raster_uv.x >= centroid_crop.x && raster_uv.y >= centroid_crop.y &&
+                          raster_uv.x <= centroid_crop.z && raster_uv.y <= centroid_crop.w;
+  if (in_centroid_crop) {
+    // Integer millimeters keep the reduction associative and avoid requiring
+    // a vendor float-atomic extension. Bounds stay below int32 at 512x424.
+    atomicAdd(centroid_sum_x_mm, int(round(p.x * 1000.0)));
+    atomicAdd(centroid_sum_y_mm, int(round(p.y * 1000.0)));
+    atomicAdd(centroid_sum_z_mm, int(round(p.z * 1000.0)));
+    atomicAdd(centroid_count, 1u);
+  }
+
+  // neighbors (mm) for normals + discontinuity
+  float dl = depthMmAt(uv + ivec2(-1, 0)), dr = depthMmAt(uv + ivec2(1, 0));
+  float du = depthMmAt(uv + ivec2(0, -1)), dd = depthMmAt(uv + ivec2(0, 1));
+
+  float range = max(max(abs(dl - d), abs(dr - d)), max(abs(du - d), abs(dd - d)));
+  bool has_invalid_neighbor = (dl <= 0.0 || dr <= 0.0 || du <= 0.0 || dd <= 0.0);
+  float discontinuity = clamp(range / max(edge_mm, 1.0), 0.0, 1.0);
+  if (has_invalid_neighbor) discontinuity = 1.0;
+
+  // central-difference normal in camera space (fall back across invalids)
+  vec3 px = unproject(uv + ivec2(1, 0), (dr > 0.0 ? dr : d) * 0.001) -
+            unproject(uv + ivec2(-1, 0), (dl > 0.0 ? dl : d) * 0.001);
+  vec3 py = unproject(uv + ivec2(0, 1), (dd > 0.0 ? dd : d) * 0.001) -
+            unproject(uv + ivec2(0, -1), (du > 0.0 ? du : d) * 0.001);
+  vec3 n = normalize(cross(px, py));
+  if (n.z < 0.0) n = -n;  // face the camera
+
+  // confidence: IR intensity (log-ish response), pulled down at boundaries
+  float ir = float(texelFetch(ir_tex, uv, 0).r);
+  float ir_conf = clamp(log2(1.0 + ir) / 14.0, 0.0, 1.0);
+  float confidence = ir_conf * (1.0 - 0.7 * discontinuity);
+
+  imageStore(position_out, uv, vec4(p, 1.0));
+  imageStore(normal_out, uv, vec4(n, confidence));
+  imageStore(boundary_out, uv, vec4(discontinuity, ir_conf, 0, 0));
+  imageStore(coloruv_out, uv, vec4(registeredColorPx(uv, d), 0, 0));
+}

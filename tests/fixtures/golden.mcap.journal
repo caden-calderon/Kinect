@@ -1,0 +1,2 @@
+{"t":2499999980,"event":"start","take":"golden.mcap"}
+{"t":2499999980,"event":"reconciliation","depth_submitted":60,"depth_written":60,"depth_dropped":0,"ir_written":60,"color_submitted":30,"color_written":30,"color_dropped":0,"capture_gaps_depth":0,"capture_gaps_color":0,"writer_failed":false}

@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Caden-Calderon <caden.calderon03@gmail.com>
+Date: Wed, 29 Jul 2026 18:18:23 -0600
+Subject: [PATCH 2/2] kinect-studio: host_receive_ns stamps from parsers
+ through to frames
+
+Both stream parsers stamp CLOCK_MONOTONIC at packet completion; all
+depth processors and both TurboJPEG color processors carry the stamp
+onto delivered Frames. This makes capture->assembled latency honestly
+measurable (E1) and feeds the frame contract's t_host_arrival.
+---
+ include/internal/libfreenect2/depth_packet_processor.h | 1 +
+ include/internal/libfreenect2/rgb_packet_processor.h   | 1 +
+ include/libfreenect2/frame_listener.hpp                | 1 +
+ src/cpu_depth_packet_processor.cpp                     | 2 ++
+ src/depth_packet_stream_parser.cpp                     | 6 ++++++
+ src/frame_listener_impl.cpp                            | 1 +
+ src/opencl_depth_packet_processor.cpp                  | 2 ++
+ src/opencl_kde_depth_packet_processor.cpp              | 2 ++
+ src/opengl_depth_packet_processor.cpp                  | 2 ++
+ src/rgb_packet_stream_parser.cpp                       | 6 ++++++
+ src/tee_jpeg_rgb_packet_processor.cpp                  | 1 +
+ src/turbo_jpeg_rgb_packet_processor.cpp                | 1 +
+ 12 files changed, 26 insertions(+)
+
+diff --git a/include/internal/libfreenect2/depth_packet_processor.h b/include/internal/libfreenect2/depth_packet_processor.h
+index ad74ed1..8280286 100644
+--- a/include/internal/libfreenect2/depth_packet_processor.h
++++ b/include/internal/libfreenect2/depth_packet_processor.h
+@@ -47,6 +47,7 @@ struct DepthPacket
+   uint32_t timestamp;
+   unsigned char *buffer; ///< Depth data.
+   size_t buffer_length;  ///< Size of depth data.
++  uint64_t host_receive_ns; ///< CLOCK_MONOTONIC at packet completion (fork)
+ 
+   Buffer *memory;
+ };
+diff --git a/include/internal/libfreenect2/rgb_packet_processor.h b/include/internal/libfreenect2/rgb_packet_processor.h
+index 5469d62..17a4cf7 100644
+--- a/include/internal/libfreenect2/rgb_packet_processor.h
++++ b/include/internal/libfreenect2/rgb_packet_processor.h
+@@ -51,6 +51,7 @@ struct RgbPacket
+   float exposure;
+   float gain;
+   float gamma;
++  uint64_t host_receive_ns; ///< CLOCK_MONOTONIC at packet completion (fork)
+ 
+   Buffer *memory;
+ };
+diff --git a/include/libfreenect2/frame_listener.hpp b/include/libfreenect2/frame_listener.hpp
+index 1b0bda1..52e59d6 100644
+--- a/include/libfreenect2/frame_listener.hpp
++++ b/include/libfreenect2/frame_listener.hpp
+@@ -74,6 +74,7 @@ class LIBFREENECT2_API Frame
+   float gamma;            ///< From 1.0 (bright) to 6.4 (covered)
+   uint32_t status;        ///< zero if ok; non-zero for errors.
+   Format format;          ///< Byte format. Informative only, doesn't indicate errors.
++  uint64_t host_receive_ns; ///< CLOCK_MONOTONIC ns when the source packet completed on the host; 0 if unknown (fork)
+ 
+   /** Construct a new frame.
+    * @param width Width in pixel
+diff --git a/src/cpu_depth_packet_processor.cpp b/src/cpu_depth_packet_processor.cpp
+index 85966b7..a0c2f9b 100644
+--- a/src/cpu_depth_packet_processor.cpp
++++ b/src/cpu_depth_packet_processor.cpp
+@@ -884,6 +884,8 @@ void CpuDepthPacketProcessor::process(const DepthPacket &packet)
+ 
+   impl_->ir_frame->timestamp = packet.timestamp;
+   impl_->depth_frame->timestamp = packet.timestamp;
++  impl_->ir_frame->host_receive_ns = packet.host_receive_ns;
++  impl_->depth_frame->host_receive_ns = packet.host_receive_ns;
+   impl_->ir_frame->sequence = packet.sequence;
+   impl_->depth_frame->sequence = packet.sequence;
+ 
+diff --git a/src/depth_packet_stream_parser.cpp b/src/depth_packet_stream_parser.cpp
+index db0a2dc..ac42b77 100644
+--- a/src/depth_packet_stream_parser.cpp
++++ b/src/depth_packet_stream_parser.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include <libfreenect2/depth_packet_stream_parser.h>
+ #include <libfreenect2/logging.h>
++#include <ctime>
+ #include <memory.h>
+ 
+ namespace libfreenect2
+@@ -116,6 +117,11 @@ void DepthPacketStreamParser::onDataReceived(unsigned char* buffer, size_t in_le
+               packet.timestamp = footer->timestamp;
+               packet.buffer = packet_.memory->data;
+               packet.buffer_length = packet_.memory->capacity;
++              {
++                struct timespec ts;
++                clock_gettime(CLOCK_MONOTONIC, &ts);
++                packet.host_receive_ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++              }
+ 
+               processor_->process(packet);
+               processor_->allocateBuffer(packet_, buffer_size_);
+diff --git a/src/frame_listener_impl.cpp b/src/frame_listener_impl.cpp
+index 45224e8..666f024 100644
+--- a/src/frame_listener_impl.cpp
++++ b/src/frame_listener_impl.cpp
+@@ -42,6 +42,7 @@ Frame::Frame(size_t width, size_t height, size_t bytes_per_pixel, unsigned char
+   gamma(0.f),
+   status(0),
+   format(Frame::Invalid),
++  host_receive_ns(0),
+   rawdata(NULL)
+ {
+   if (data_)
+diff --git a/src/opencl_depth_packet_processor.cpp b/src/opencl_depth_packet_processor.cpp
+index 5ddc926..561ae0a 100644
+--- a/src/opencl_depth_packet_processor.cpp
++++ b/src/opencl_depth_packet_processor.cpp
+@@ -796,6 +796,8 @@ void OpenCLDepthPacketProcessor::process(const DepthPacket &packet)
+ 
+   impl_->ir_frame->timestamp = packet.timestamp;
+   impl_->depth_frame->timestamp = packet.timestamp;
++  impl_->ir_frame->host_receive_ns = packet.host_receive_ns;
++  impl_->depth_frame->host_receive_ns = packet.host_receive_ns;
+   impl_->ir_frame->sequence = packet.sequence;
+   impl_->depth_frame->sequence = packet.sequence;
+ 
+diff --git a/src/opencl_kde_depth_packet_processor.cpp b/src/opencl_kde_depth_packet_processor.cpp
+index 213e8b6..0ccbbbd 100644
+--- a/src/opencl_kde_depth_packet_processor.cpp
++++ b/src/opencl_kde_depth_packet_processor.cpp
+@@ -860,6 +860,8 @@ void OpenCLKdeDepthPacketProcessor::process(const DepthPacket &packet)
+ 
+   impl_->ir_frame->timestamp = packet.timestamp;
+   impl_->depth_frame->timestamp = packet.timestamp;
++  impl_->ir_frame->host_receive_ns = packet.host_receive_ns;
++  impl_->depth_frame->host_receive_ns = packet.host_receive_ns;
+   impl_->ir_frame->sequence = packet.sequence;
+   impl_->depth_frame->sequence = packet.sequence;
+ 
+diff --git a/src/opengl_depth_packet_processor.cpp b/src/opengl_depth_packet_processor.cpp
+index f9d0adc..a311aa8 100644
+--- a/src/opengl_depth_packet_processor.cpp
++++ b/src/opengl_depth_packet_processor.cpp
+@@ -973,6 +973,8 @@ void OpenGLDepthPacketProcessor::process(const DepthPacket &packet)
+ 
+   ir->timestamp = packet.timestamp;
+   depth->timestamp = packet.timestamp;
++  ir->host_receive_ns = packet.host_receive_ns;
++  depth->host_receive_ns = packet.host_receive_ns;
+   ir->sequence = packet.sequence;
+   depth->sequence = packet.sequence;
+ 
+diff --git a/src/rgb_packet_stream_parser.cpp b/src/rgb_packet_stream_parser.cpp
+index bc3fb6c..ac499cb 100644
+--- a/src/rgb_packet_stream_parser.cpp
++++ b/src/rgb_packet_stream_parser.cpp
+@@ -29,6 +29,7 @@
+ #include <libfreenect2/config.h>
+ #include <libfreenect2/rgb_packet_stream_parser.h>
+ #include <libfreenect2/logging.h>
++#include <ctime>
+ #include <memory.h>
+ 
+ namespace libfreenect2
+@@ -158,6 +159,11 @@ void RgbPacketStreamParser::onDataReceived(unsigned char* buffer, size_t length)
+         rgb_packet.gamma = footer->gamma;
+         rgb_packet.jpeg_buffer = raw_packet->jpeg_buffer;
+         rgb_packet.jpeg_buffer_length = jpeg_length;
++        {
++          struct timespec ts;
++          clock_gettime(CLOCK_MONOTONIC, &ts);
++          rgb_packet.host_receive_ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++        }
+ 
+         // call the processor
+         processor_->process(rgb_packet);
+diff --git a/src/tee_jpeg_rgb_packet_processor.cpp b/src/tee_jpeg_rgb_packet_processor.cpp
+index 0c2bd81..a103d3b 100644
+--- a/src/tee_jpeg_rgb_packet_processor.cpp
++++ b/src/tee_jpeg_rgb_packet_processor.cpp
+@@ -249,6 +249,7 @@ void TeeJpegRgbPacketProcessor::process(const RgbPacket &packet)
+   TeeColorFrame *frame = impl_->pool->makeFrame(slot, packet.jpeg_buffer_length);
+   frame->timestamp = packet.timestamp;
+   frame->sequence = packet.sequence;
++  frame->host_receive_ns = packet.host_receive_ns;
+   frame->exposure = packet.exposure;
+   frame->gain = packet.gain;
+   frame->gamma = packet.gamma;
+diff --git a/src/turbo_jpeg_rgb_packet_processor.cpp b/src/turbo_jpeg_rgb_packet_processor.cpp
+index 5fdb615..278db22 100644
+--- a/src/turbo_jpeg_rgb_packet_processor.cpp
++++ b/src/turbo_jpeg_rgb_packet_processor.cpp
+@@ -91,6 +91,7 @@ void TurboJpegRgbPacketProcessor::process(const RgbPacket &packet)
+ 
+     impl_->frame->timestamp = packet.timestamp;
+     impl_->frame->sequence = packet.sequence;
++    impl_->frame->host_receive_ns = packet.host_receive_ns;
+     impl_->frame->exposure = packet.exposure;
+     impl_->frame->gain = packet.gain;
+     impl_->frame->gamma = packet.gamma;
