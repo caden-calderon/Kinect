@@ -51,6 +51,11 @@ capture-level gaps) is written to **both** the container's `/events`
 channel and the journal, so a take remains honest about its own
 completeness even when the container tail is lost.
 
+A take is labeled `CLEAN` only when the writer did not fail, recorder queues
+dropped nothing, and both capture-gap counts are zero. Successfully writing
+every frame that reached the process does not erase missing device sequence
+numbers.
+
 ## Failure semantics
 
 - Recorder queues full → frames drop **with counted loss events**

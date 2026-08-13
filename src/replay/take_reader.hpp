@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "capture/rgbd_frame.hpp"
@@ -49,6 +50,10 @@ class TakeReader {
   void close();
 
   std::shared_ptr<const CalibrationBlob> calibration() const;
+
+  /// Exact /calibration JSON bytes embedded in the take. Empty only when the
+  /// take is damaged and contains no calibration record.
+  const std::string& calibrationJson() const;
 
   /// Number of depth frames (the transport's frame unit).
   size_t depthFrameCount() const;

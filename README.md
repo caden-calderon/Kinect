@@ -66,24 +66,52 @@ What exists now:
   Machine gates are green. Background plate workflow and format are documented in
   [docs/background-plates.md](docs/background-plates.md). The 2026-08-01 live
   follow-up added automatic subject-relative depth range/fog, a raw Kinect
-  color-view toggle, isolated-depth-speck cleanup, and free orbit/pan/dolly
-  navigation; behavior and limits are documented in
+  color-view toggle, isolated-depth-speck cleanup, and free
+  orbit/pan/dolly/fly navigation with physical and optical zoom; behavior and
+  limits are documented in
   [docs/subject-framing.md](docs/subject-framing.md).
 - **Tracked-body foundation and arm-first occlusion completion implemented
-  2026-08-01.** The provider isolation, exact source pairing, Kinect-metric
+  2026-08-01 and corrected 2026-08-09.** The provider isolation, exact source pairing, Kinect-metric
   placement, provenance, filtering, and bounded capsule support topology all
   remain. Caden's extended-arm review rejected the solid capsule replacement
-  and endpoint-alpha hybrid as the wrong product behavior. The corrected
-  `completion` mode now separates landmark presence from visibility, rejects
+  and endpoint-alpha hybrid as the wrong product behavior. The `completion`
+  mode separates landmark presence from visibility, rejects
   foreground hand depth as an elbow, constrains hidden elbows with stable
   two-link arm lengths, and adds only depth-tested arm surfels unsupported by
-  the measured cloud. The full capsule body is `diagnostic` only; `observed`
+  the measured cloud. The 2026-08-09 review found that candidate generation
+  still incorrectly required an inferred endpoint, so a fully located but
+  surface-occluded arm could emit nothing. Arm spans now always provide
+  bounded candidates; the observed depth raster, not joint provenance,
+  decides surface visibility. The full capsule body is `diagnostic` only; `observed`
   remains the safe default/fallback. See
   [docs/tracked-body.md](docs/tracked-body.md) and the active
-  [occlusion-completion plan](docs/plan-occlusion-completion.md). 79
+  [occlusion-completion plan](docs/plan-occlusion-completion.md). 89
   no-hardware test cases plus OpenGL replay self-tests cover the current
   foundation (`cd build && ctest`). Live extended-arm approval and the frozen
   pose sidecar remain open; no parametric-body choice has been made.
+- **Spectral Backfill restored to its first live baseline 2026-08-09.** A
+  bounded, slot-stable GPU pool emits deterministic `Layer::Artistic` points
+  behind valid measured samples in dense near, deeper volume, and rare
+  silhouette/motion-wisp bands. The original four-field particle layout,
+  source-pixel motion, full lifecycle respawns, additive draw order, point
+  styling, and `Astral Wake` values are restored. Later depth-prepass,
+  reprojection, lateral-scatter, and spring-distribution experiments were
+  removed after Caden identified their lines, clusters, and broken motion as a
+  regression. Replay and live baseline smokes are green; Caden's direct visual
+  reconfirmation and the sustained installation soak remain open. See
+  [docs/spectral-backfill.md](docs/spectral-backfill.md).
+- **Offline full-body reconstruction lane is locally prepared, not launched.**
+  `kstudio-body-extract` now performs a true no-write dry run by default and
+  can transactionally publish an immutable, SHA-256-validated,
+  content-addressed RGB/depth bundle after explicit `--write`. Golden tests
+  cover pairing, exact depth bytes, immutability, and tamper detection. The
+  remote result manifest, Kinect metric-alignment stage, canonical
+  inferred-body sidecar, stable-topology point sampling, privacy boundary,
+  and paid-compute approval gate are in
+  [docs/plan-offline-body-reconstruction.md](docs/plan-offline-body-reconstruction.md).
+  The existing `e4-input.mcap` dry run wrote nothing and reported 603 frames,
+  21 missing-color frames, 291 unique JPEGs, and a 483.66 MiB portable bundle.
+  No RunPod resources, uploads, or checkpoint downloads have been started.
 - Discovery docs updated `[verify]` → `[measured]` where evidence
   exists; the discovery package remains the source of truth.
 

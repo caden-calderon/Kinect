@@ -29,6 +29,7 @@ set_target_properties(freenect2_fork PROPERTIES
 find_library(TURBOJPEG_LIB turbojpeg REQUIRED)
 find_library(LZ4_LIB lz4 REQUIRED)
 find_library(ZSTD_LIB zstd REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 include(FetchContent)
 FetchContent_Declare(mcap

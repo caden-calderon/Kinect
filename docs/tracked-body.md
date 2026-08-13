@@ -37,8 +37,8 @@ as recorded or live tracking data.
 ## What each mode means
 
 - `observed`: the current Kinect depth surface and/or point field only.
-- `completion`: observed geometry plus bounded arm/hand surfels around hidden
-  inferred spans. Every surfel is projected into the current Kinect position
+- `completion`: observed geometry plus bounded arm/hand candidates around
+  tracked spans. Every surfel is projected into the current Kinect position
   raster. Measured support and contradicted foreground proposals suppress it;
   plausible geometry behind a measured occluder remains available when the
   view orbits.
@@ -75,10 +75,11 @@ tracked joints or mutate observed depth products.
    using the model elbow as the bend-plane prior. Slowly adapting arm lengths
    stop frame-to-frame model jitter from stretching the chain.
 7. `CapsuleBodyBuilder` preserves each endpoint's provenance separately.
-   `CompletionSurfelBuilder` samples only arm/hand spans that contain inferred
-   evidence into pre-sized GPU storage. The completion shader suppresses
-   samples already supported or contradicted by the current observed position
-   texture. Neither stage can overwrite `Layer::Observed`.
+   `CompletionSurfelBuilder` samples every usable arm/hand span into pre-sized
+   GPU storage; inferred evidence increases candidate weight but does not
+   decide whether the intervening limb surface was visible. The completion
+   shader suppresses samples already supported or contradicted by the current
+   observed position texture. Neither stage can overwrite `Layer::Observed`.
 
 MediaPipe's image/model Z is not used as an independent world placement. The
 BlazePose model card says model Z is synthetic and non-metric, so Kinect depth
@@ -126,8 +127,11 @@ signal-age p95. Inferred held 29.9 Hz and completed 145. Both acquired a
 healthy tracked body and reported zero malformed results. This cleared the
 short numerical >=15 Hz / <=80 ms tracker-renderer gate. Caden's subsequent
 visual verdict was that complete capsules and endpoint-alpha hybrid did not
-meaningfully fill the Kinect's self-occlusion gaps. That verdict is the reason
-the current completion path exists; the old visual result is not considered
+meaningfully fill the Kinect's self-occlusion gaps. On 2026-08-09 he also
+reported no visible benefit from the revised completion. Inspection found a
+remaining eligibility defect: all-observed endpoints produced zero candidates
+even when the limb surface between them was hidden. That gate is now removed
+and regression-tested, but the corrected result is still not visually
 accepted.
 
 Still open before E6 closes:

@@ -51,12 +51,18 @@ prime-run build/src/kstudio --take takes/example.mcap --camera-preview
 - Right or middle drag: pan the pivot in the camera plane. A manual pan sets
   `camera.follow` to zero so follow cannot immediately undo the move.
 - Wheel: proportional dolly.
+- `W`/`A`/`S`/`D`: fly the complete camera rig forward/left/back/right.
+- `Q`/`E`: fly down/up. Hold Shift for a fast move or Alt for precise
+  close-up movement.
+- Ctrl+wheel: optical lens zoom (15-100 degree field of view) without moving
+  through the point volume.
 - `F` or **reset camera**: restore the default camera.
 
 Pitch is limited to 88 degrees, preventing an accidental pole crossing from
 turning the view upside-down. The camera is still represented as an orbit
-camera, but its pivot is freely movable; this gives predictable art-tool
-orbit/pan/dolly behavior without introducing a second camera model.
+camera, but its pivot is freely movable and the complete rig can translate in
+camera-local axes. This gives predictable art-tool orbit/pan/dolly/fly
+behavior without introducing a second camera model.
 
 ## Close-range depth expectations
 

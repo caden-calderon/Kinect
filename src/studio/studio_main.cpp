@@ -7,9 +7,12 @@
 //   kstudio --geometry-mode M   observed, completion, or diagnostic
 //   kstudio --synthetic-body    deterministic capsule diagnostic (replay)
 //
-// Keys: Tab = clean output · C = Kinect camera/3D view · F = reset camera
+// Camera: LMB orbit · RMB/MMB pan · wheel dolly · Ctrl+wheel lens zoom
+//         WASD fly · Q/E down/up · Shift fast · F reset
+// Keys: Tab = clean output · C = Kinect camera/3D view
 //       Space = play/pause (replay) · R = shader hot-reload
 //       F12 = screenshot (PPM to screenshots/) · Esc = quit
+// Gate: --record [--record-warmup-frames N] --selftest <ppm>
 //
 // The recorder is a tap started from the UI; every visual acceptance gate
 // from phase 3 on runs live+record (roadmap).
@@ -24,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,6 +54,7 @@
 #include "render/mat4.hpp"
 #include "render/observed_pipeline.hpp"
 #include "render/post_chain.hpp"
+#include "render/spectral_backfill.hpp"
 #include "render/subject_focus.hpp"
 #include "replay/replay_source.hpp"
 #include "track/body_tracker.hpp"
@@ -106,39 +111,51 @@ void screenshotPpm(const std::string& path, GLuint fbo, int w, int h) {
 
 void drawParamsPanel(Parameters& params, bool automatic_subject_range) {
   ImGui::Begin("controls");
-  std::string open_group;
-  bool group_open = false;
-  for (const auto& item : params.items()) {
-    if (item.group != open_group) {
-      open_group = item.group;
-      group_open = ImGui::CollapsingHeader(item.group.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+  std::vector<std::string> groups;
+  for (const auto& item : params.items())
+    if (std::find(groups.begin(), groups.end(), item.group) == groups.end())
+      groups.push_back(item.group);
+
+  // Parameters may be registered by several pipelines into the same group
+  // (for example color and motion). Render every logical group exactly once;
+  // repeated CollapsingHeader labels otherwise collide in Dear ImGui.
+  for (const std::string& group : groups) {
+    ImGui::PushID(group.c_str());
+    const bool group_open = ImGui::CollapsingHeader(group.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+    if (!group_open) {
+      ImGui::PopID();
+      continue;
     }
-    if (!group_open) continue;
-    ImGui::PushID(item.entry);
-    const bool is_manual_range =
-        item.group == "geometry" && (item.name == "clip_near_mm" || item.name == "clip_far_mm");
-    const bool is_manual_focus = item.group == "points" && item.name == "focus_depth_mm";
-    const bool automatic_override = automatic_subject_range && (is_manual_range || is_manual_focus);
-    ImGui::BeginDisabled(automatic_override);
-    std::visit(
-        [&](auto& e) {
-          using T = std::decay_t<decltype(e)>;
-          if constexpr (std::is_same_v<T, Parameters::Float>)
-            ImGui::SliderFloat(item.name.c_str(), &e.value, e.min, e.max);
-          else if constexpr (std::is_same_v<T, Parameters::Int>)
-            ImGui::SliderInt(item.name.c_str(), &e.value, e.min, e.max);
-          else if constexpr (std::is_same_v<T, Parameters::Bool>)
-            ImGui::Checkbox(item.name.c_str(), &e.value);
-          else if constexpr (std::is_same_v<T, Parameters::Enum>) {
-            std::vector<const char*> opts;
-            for (const auto& o : e.options) opts.push_back(o.c_str());
-            ImGui::Combo(item.name.c_str(), &e.value, opts.data(), int(opts.size()));
-          }
-        },
-        *item.entry);
-    ImGui::EndDisabled();
-    if (automatic_override && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-      ImGui::SetTooltip("Manual fallback; auto_subject_range currently drives this value.");
+    for (const auto& item : params.items()) {
+      if (item.group != group) continue;
+      ImGui::PushID(item.entry);
+      const bool is_manual_range =
+          item.group == "geometry" && (item.name == "clip_near_mm" || item.name == "clip_far_mm");
+      const bool is_manual_focus = item.group == "points" && item.name == "focus_depth_mm";
+      const bool automatic_override =
+          automatic_subject_range && (is_manual_range || is_manual_focus);
+      ImGui::BeginDisabled(automatic_override);
+      std::visit(
+          [&](auto& e) {
+            using T = std::decay_t<decltype(e)>;
+            if constexpr (std::is_same_v<T, Parameters::Float>)
+              ImGui::SliderFloat(item.name.c_str(), &e.value, e.min, e.max);
+            else if constexpr (std::is_same_v<T, Parameters::Int>)
+              ImGui::SliderInt(item.name.c_str(), &e.value, e.min, e.max);
+            else if constexpr (std::is_same_v<T, Parameters::Bool>)
+              ImGui::Checkbox(item.name.c_str(), &e.value);
+            else if constexpr (std::is_same_v<T, Parameters::Enum>) {
+              std::vector<const char*> opts;
+              for (const auto& o : e.options) opts.push_back(o.c_str());
+              ImGui::Combo(item.name.c_str(), &e.value, opts.data(), int(opts.size()));
+            }
+          },
+          *item.entry);
+      ImGui::EndDisabled();
+      if (automatic_override && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Manual fallback; auto_subject_range currently drives this value.");
+      ImGui::PopID();
+    }
     ImGui::PopID();
   }
   ImGui::End();
@@ -173,6 +190,7 @@ int main(int argc, char** argv) {
   const char* initial_plate_path = nullptr;
   const char* selftest_out = nullptr;  // screenshot after 45 captured frames, exit
   uint64_t selftest_frames = 45;
+  uint64_t record_warmup_frames = 0;
   const char* initial_geometry_mode = nullptr;
   bool record_flag = false;  // start a take immediately (gate testing)
   bool start_color_preview = false;
@@ -197,7 +215,15 @@ int main(int argc, char** argv) {
       selftest_frames = uint64_t(parsed);
     } else if (!std::strcmp(argv[i], "--record"))
       record_flag = true;
-    else if (!std::strcmp(argv[i], "--camera-preview"))
+    else if (!std::strcmp(argv[i], "--record-warmup-frames") && i + 1 < argc) {
+      char* end = nullptr;
+      const long parsed = std::strtol(argv[++i], &end, 10);
+      if (!end || *end != '\0' || parsed < 0 || parsed > 1'800) {
+        std::fprintf(stderr, "--record-warmup-frames must be between 0 and 1800\n");
+        return 2;
+      }
+      record_warmup_frames = uint64_t(parsed);
+    } else if (!std::strcmp(argv[i], "--camera-preview"))
       start_color_preview = true;
     else if (!std::strcmp(argv[i], "--geometry-mode") && i + 1 < argc)
       initial_geometry_mode = argv[++i];
@@ -208,6 +234,14 @@ int main(int argc, char** argv) {
   }
   if (initial_geometry_mode && !parseGeometryMode(initial_geometry_mode)) {
     std::fprintf(stderr, "invalid geometry mode: %s\n", initial_geometry_mode);
+    return 2;
+  }
+  if (record_warmup_frames > 0 && !record_flag) {
+    std::fprintf(stderr, "--record-warmup-frames requires --record\n");
+    return 2;
+  }
+  if (selftest_out && record_flag && record_warmup_frames >= selftest_frames) {
+    std::fprintf(stderr, "selftest must run past the recording warmup\n");
     return 2;
   }
 
@@ -240,9 +274,11 @@ int main(int argc, char** argv) {
   Parameters params;
   ObservedPipeline observed;
   CapsulePipeline capsules;
+  SpectralBackfillPipeline spectral_backfill;
   PostChain post;
   observed.registerParams(params);
   capsules.registerParams(params);
+  spectral_backfill.registerParams(params);
   post.registerParams(params);
   float* p_cam_auto_orbit = params.addFloat("camera", "auto_orbit", 0.0f, 0, 1);
   float* p_cam_idle_drift = params.addFloat("camera", "idle_drift", 0.35f, 0, 1);
@@ -252,7 +288,8 @@ int main(int argc, char** argv) {
   bool* p_flow_enabled = params.addBool("motion", "enabled", true);
   int* p_flow_preset = params.addEnum("motion", "preset", 1, {"ultrafast", "fast"});
 
-  if (!observed.init() || !capsules.init() || !post.init(kOutW, kOutH)) {
+  if (!observed.init() || !capsules.init() || !spectral_backfill.init() ||
+      !post.init(kOutW, kOutH)) {
     std::fprintf(stderr, "pipeline init failed (shaders?)\n");
     return 1;
   }
@@ -263,6 +300,8 @@ int main(int argc, char** argv) {
   flow_engine.start();
   TakeRecorder* recorder = nullptr;  // created per take
   std::unique_ptr<TakeRecorder> recorder_owned;
+  bool recording_run_clean = true;
+  bool automatic_record_start_attempted = false;
   std::unique_ptr<PoseProvider> pose_provider;
   bool provider_start_attempted = false;
   if (!disable_pose && !synthetic_body) pose_provider = std::make_unique<PoseProvider>(telemetry);
@@ -366,6 +405,7 @@ int main(int argc, char** argv) {
     std::string text((std::istreambuf_iterator<char>(f)), {});
     auto report = params.loadPreset(text);
     status_line = report.ok ? "loaded " + path : "preset error: " + report.error;
+    spectral_backfill.reset();
     post.resetHistory();
   };
 
@@ -385,19 +425,32 @@ int main(int argc, char** argv) {
     status_line = "loaded plate " + std::string(plate_path.data());
   };
 
+  auto startTakeRecording = [&](bool save_preset_snapshot, bool required_for_gate) {
+    TakeRecorder::Config config;
+    config.take_path = "takes/" + timestampName() + ".mcap";
+    auto candidate = std::make_unique<TakeRecorder>(config, telemetry);
+    if (!candidate->start(calib)) {
+      if (required_for_gate) recording_run_clean = false;
+      status_line = "recorder failed to start";
+      return false;
+    }
+    if (save_preset_snapshot)
+      std::ofstream(config.take_path.string() + ".preset.json") << params.savePreset();
+    recorder_owned = std::move(candidate);
+    recorder = recorder_owned.get();
+    status_line = "recording " + config.take_path.string();
+    std::printf("recording %s\n", config.take_path.c_str());
+    return true;
+  };
+
   if (preset_path) applyPresetFile(preset_path);
   if (initial_plate_path) loadPlateFile();
   if (initial_geometry_mode)
     *capsules.p_geometry_mode = int(*parseGeometryMode(initial_geometry_mode));
 
-  if (record_flag) {
-    TakeRecorder::Config cfg;
-    cfg.take_path = "takes/" + timestampName() + ".mcap";
-    recorder_owned = std::make_unique<TakeRecorder>(cfg, telemetry);
-    if (recorder_owned->start(calib)) {
-      recorder = recorder_owned.get();
-      std::printf("recording %s\n", cfg.take_path.c_str());
-    }
+  if (record_flag && record_warmup_frames == 0) {
+    automatic_record_start_attempted = true;
+    startTakeRecording(false, true);
   }
 
   while (!glfwWindowShouldClose(window)) {
@@ -419,12 +472,41 @@ int main(int argc, char** argv) {
       if (ImGui::IsKeyPressed(ImGuiKey_F, false)) resetCamera();
       if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) glfwSetWindowShouldClose(window, 1);
       if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
-        const bool ok =
-            observed.reloadShaders() && capsules.reloadShaders() && post.reloadShaders();
+        const bool observed_ok = observed.reloadShaders();
+        const bool capsules_ok = capsules.reloadShaders();
+        const bool backfill_ok = spectral_backfill.reloadShaders();
+        const bool post_ok = post.reloadShaders();
+        const bool ok = observed_ok && capsules_ok && backfill_ok && post_ok;
         status_line = ok ? "shaders reloaded" : "shader reload FAILED (kept previous)";
       }
       if (replay && ImGui::IsKeyPressed(ImGuiKey_Space, false))
         replay->playing() ? replay->pause() : replay->play();
+
+      if (!color_preview) {
+        CameraTranslation direction;
+        direction.right_m =
+            float(ImGui::IsKeyDown(ImGuiKey_D)) - float(ImGui::IsKeyDown(ImGuiKey_A));
+        direction.up_m = float(ImGui::IsKeyDown(ImGuiKey_E)) - float(ImGui::IsKeyDown(ImGuiKey_Q));
+        direction.forward_m =
+            float(ImGui::IsKeyDown(ImGuiKey_W)) - float(ImGui::IsKeyDown(ImGuiKey_S));
+        const float direction_length =
+            std::sqrt(direction.right_m * direction.right_m + direction.up_m * direction.up_m +
+                      direction.forward_m * direction.forward_m);
+        if (direction_length > 0.0f) {
+          // Scale speed with inspection distance, while keeping close-up
+          // navigation controllable. Normalize so diagonals are not faster.
+          float speed_m_s = std::clamp(camera.distance * 1.5f, 0.25f, 6.0f);
+          if (io.KeyShift) speed_m_s *= 4.0f;
+          if (io.KeyAlt) speed_m_s *= 0.2f;
+          const float travel = speed_m_s * std::clamp(io.DeltaTime, 0.0f, 0.1f) / direction_length;
+          direction.right_m *= travel;
+          direction.up_m *= travel;
+          direction.forward_m *= travel;
+          translateOrbitCamera(camera, direction);
+          *p_cam_follow = 0.0f;
+          applied_manual_pivot_z = *p_cam_pivot_z;
+        }
+      }
     }
     if (!io.WantCaptureMouse && !color_preview) {
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
@@ -439,7 +521,10 @@ int main(int argc, char** argv) {
         *p_cam_follow = 0.0f;
         applied_manual_pivot_z = *p_cam_pivot_z;
       }
-      dollyOrbitCamera(camera, io.MouseWheel);
+      if (io.KeyCtrl)
+        zoomOrbitCamera(camera, io.MouseWheel);
+      else
+        dollyOrbitCamera(camera, io.MouseWheel);
     }
     if (*p_cam_follow <= 0.0f && *p_cam_pivot_z != applied_manual_pivot_z) {
       camera.pivot[2] = -*p_cam_pivot_z;
@@ -487,6 +572,13 @@ int main(int argc, char** argv) {
       }
       observed.upload(*f);
       const auto centroid = observed.computeGeometry();
+      spectral_backfill.update(
+          source_frame_index,
+          {.position = observed.positionTex(),
+           .normal = observed.normalTex(),
+           .boundary = observed.boundaryTex()},
+          {*observed.p_crop[0], *observed.p_crop[1], *observed.p_crop[2], *observed.p_crop[3]},
+          subject_estimate ? std::optional<float>(subject_estimate->depth_mm) : std::nullopt);
       const EffectiveDepthRange effective_range = observed.effectiveDepthRange();
       effective_near_mm.set(effective_range.near_mm);
       effective_far_mm.set(effective_range.far_mm);
@@ -502,6 +594,10 @@ int main(int argc, char** argv) {
       }
       last_frame_host_ns = (*f).t_host_depth_ns;
       ++fps_frames;
+    }
+    if (record_flag && !automatic_record_start_attempted && fps_frames >= record_warmup_frames) {
+      automatic_record_start_attempted = true;
+      startTakeRecording(false, true);
     }
     if (auto field = flow_engine.latest(); field && field != current_flow) {
       observed.uploadFlow(*field);
@@ -579,6 +675,7 @@ int main(int argc, char** argv) {
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
+    if (draw_observed) spectral_backfill.draw(vp.m, view.m, world.m);
     // Source-content index: stable across replay pacing and seeks (E7).
     const float jx = float((source_frame_index * 2654435761u) % 1000) / 1000.f - 0.5f;
     const float jy = float((source_frame_index * 40503u) % 1000) / 1000.f - 0.5f;
@@ -612,6 +709,9 @@ int main(int argc, char** argv) {
       }
       std::printf("body: healthy %d state %s capsules %d\n", int(body_healthy),
                   trackingStateName(body_tracking_state), int(capsules.hasBody()));
+      std::printf("spectral backfill: %u particles sim %.3f ms draw %.3f ms\n",
+                  spectral_backfill.activeCount(), spectral_backfill.simulationTimer().latest_ms(),
+                  spectral_backfill.drawTimer().latest_ms());
       glfwSetWindowShouldClose(window, 1);
     }
 
@@ -647,7 +747,8 @@ int main(int argc, char** argv) {
         if (!observed.hasCurrentColor())
           ImGui::TextColored({1.0f, 0.55f, 0.2f, 1.0f}, "No color paired with this depth frame");
       }
-      ImGui::TextDisabled("LMB orbit | RMB/MMB pan | wheel dolly | C camera | F reset");
+      ImGui::TextDisabled("LMB orbit | RMB/MMB pan | wheel dolly | Ctrl+wheel lens zoom");
+      ImGui::TextDisabled("WASD fly | Q/E down/up | Shift fast | Alt precise | F reset");
       if (subject_estimate) {
         const EffectiveDepthRange range = observed.effectiveDepthRange();
         ImGui::Text("subject %.0f mm (%.0f%% support) | active range %.0f-%.0f mm",
@@ -673,6 +774,8 @@ int main(int argc, char** argv) {
           ImGui::TextColored({1.0f, 0.4f, 0.3f, 1.0f}, "%s", provider_status.detail.c_str());
       }
       ImGui::Separator();
+      if (ImGui::Button("Astral Wake")) applyPresetFile("presets/astral-wake.json");
+      ImGui::SameLine();
       if (ImGui::Button("Luminous Shell")) applyPresetFile("presets/luminous-shell.json");
       ImGui::SameLine();
       if (ImGui::Button("Dense Veil")) applyPresetFile("presets/dense-veil.json");
@@ -681,6 +784,7 @@ int main(int argc, char** argv) {
         params.resetAllToDefaults();
         resetCamera();
         subject_tracker.reset();
+        spectral_backfill.reset();
         post.resetHistory();
       }
       if (ImGui::Button("save preset")) {
@@ -724,27 +828,20 @@ int main(int argc, char** argv) {
       ImGui::SameLine();
       if (!recorder) {
         if (ImGui::Button("start take")) {
-          TakeRecorder::Config cfg;
-          cfg.take_path = "takes/" + timestampName() + ".mcap";
-          recorder_owned = std::make_unique<TakeRecorder>(cfg, telemetry);
-          if (recorder_owned->start(calib)) {
-            // preset snapshot rides with the take directory (print recipe)
-            std::ofstream(cfg.take_path.string() + ".preset.json") << params.savePreset();
-            recorder = recorder_owned.get();
-            status_line = "recording " + cfg.take_path.string();
-          } else {
-            recorder_owned.reset();
-            status_line = "recorder failed to start";
-          }
+          // Preset snapshot rides with manually authored takes (print recipe).
+          startTakeRecording(true, false);
         }
       } else {
         if (ImGui::Button("stop take") || recorder->state() == TakeRecorder::State::Failed) {
           auto r = recorder_owned->stop();
-          char buf[160];
-          std::snprintf(buf, sizeof(buf), "take done: depth %llu/%llu color %llu/%llu%s",
-                        (unsigned long long)r.depth_written, (unsigned long long)r.depth_submitted,
-                        (unsigned long long)r.color_written, (unsigned long long)r.color_submitted,
-                        r.clean() ? "" : " [LOSS OR FAILURE — see journal]");
+          recording_run_clean = recording_run_clean && r.clean();
+          char buf[240];
+          std::snprintf(
+              buf, sizeof(buf), "take done: depth %llu/%llu color %llu/%llu gaps %llu/%llu%s",
+              (unsigned long long)r.depth_written, (unsigned long long)r.depth_submitted,
+              (unsigned long long)r.color_written, (unsigned long long)r.color_submitted,
+              (unsigned long long)r.capture_gaps_depth, (unsigned long long)r.capture_gaps_color,
+              r.clean() ? "" : " [LOSS OR FAILURE — see journal]");
           status_line = buf;
           recorder = nullptr;
           recorder_owned.reset();
@@ -775,6 +872,9 @@ int main(int argc, char** argv) {
                     observed.uploadTimer().latest_ms(), observed.geometryTimer().latest_ms(),
                     observed.pointsTimer().latest_ms(), observed.surfaceTimer().latest_ms(),
                     capsules.timer().latest_ms(), post.timer().latest_ms());
+        ImGui::Text("gpu: spectral sim %.2f draw %.2f ms | %u artistic particles",
+                    spectral_backfill.simulationTimer().latest_ms(),
+                    spectral_backfill.drawTimer().latest_ms(), spectral_backfill.activeCount());
         if (recorder) ImGui::TextColored({1, 0.3f, 0.3f, 1}, "REC");
         for (const auto& s : telemetry.snapshot())
           if (s.value != 0) ImGui::Text("%s: %.0f", s.name.c_str(), s.value);
@@ -803,11 +903,14 @@ int main(int argc, char** argv) {
 
   if (recorder_owned) {
     auto r = recorder_owned->stop();
-    std::printf("take reconciliation: depth %llu/%llu color %llu/%llu dropped %llu/%llu%s\n",
-                (unsigned long long)r.depth_written, (unsigned long long)r.depth_submitted,
-                (unsigned long long)r.color_written, (unsigned long long)r.color_submitted,
-                (unsigned long long)r.depth_dropped, (unsigned long long)r.color_dropped,
-                r.clean() ? " CLEAN" : " LOSS/FAILURE");
+    recording_run_clean = recording_run_clean && r.clean();
+    std::printf(
+        "take reconciliation: depth %llu/%llu color %llu/%llu dropped %llu/%llu gaps %llu/%llu%s\n",
+        (unsigned long long)r.depth_written, (unsigned long long)r.depth_submitted,
+        (unsigned long long)r.color_written, (unsigned long long)r.color_submitted,
+        (unsigned long long)r.depth_dropped, (unsigned long long)r.color_dropped,
+        (unsigned long long)r.capture_gaps_depth, (unsigned long long)r.capture_gaps_color,
+        r.clean() ? " CLEAN" : " LOSS/FAILURE");
   }
   if (replay) replay->stop();
   if (live) {
@@ -821,5 +924,5 @@ int main(int argc, char** argv) {
   ImGui::DestroyContext();
   glfwDestroyWindow(window);
   glfwTerminate();
-  return 0;
+  return recording_run_clean ? 0 : 2;
 }

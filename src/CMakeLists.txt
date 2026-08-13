@@ -14,6 +14,9 @@ target_include_directories(kstudio_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(kstudio_core SYSTEM PUBLIC "${mcap_SOURCE_DIR}/cpp/mcap/include")
 target_link_libraries(kstudio_core PUBLIC freenect2_fork ${LZ4_LIB} ${ZSTD_LIB} ${TURBOJPEG_LIB})
 
+add_library(kstudio_offline STATIC offline/body_bundle.cpp)
+target_link_libraries(kstudio_offline PUBLIC kstudio_core nlohmann_json::nlohmann_json OpenSSL::Crypto)
+
 # Motion field (phase 4): OpenCV DIS flow on a worker thread. System OpenCV 5
 # (Arch `opencv`), components only — no highgui/imgcodecs baggage.
 find_package(OpenCV REQUIRED COMPONENTS core imgproc video)
@@ -42,6 +45,7 @@ add_library(kstudio_render STATIC
   render/gl_util.cpp
   render/observed_pipeline.cpp
   render/post_chain.cpp
+  render/spectral_backfill.cpp
   render/subject_focus.cpp
 )
 target_link_libraries(kstudio_render PUBLIC kstudio_core kstudio_motion kstudio_track nlohmann_json::nlohmann_json ${EPOXY_LIB})
@@ -70,3 +74,6 @@ target_link_libraries(kstudio-probe PRIVATE kstudio_core)
 
 add_executable(kstudio-golden studio/golden_main.cpp)
 target_link_libraries(kstudio-golden PRIVATE kstudio_core)
+
+add_executable(kstudio-body-extract studio/body_extract_main.cpp)
+target_link_libraries(kstudio-body-extract PRIVATE kstudio_offline)

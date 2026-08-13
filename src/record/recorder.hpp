@@ -54,7 +54,13 @@ class TakeRecorder {
     uint64_t capture_gaps_depth = 0, capture_gaps_color = 0;
     bool writer_failed = false;
     std::string failure_reason;
-    bool clean() const { return !writer_failed && depth_dropped == 0 && color_dropped == 0; }
+    /// True only when both capture and recorder paths are lossless. A take
+    /// with perfectly written submitted frames but missing device sequence
+    /// numbers is honest and readable, but it is not a clean gate result.
+    bool clean() const {
+      return !writer_failed && depth_dropped == 0 && color_dropped == 0 &&
+             capture_gaps_depth == 0 && capture_gaps_color == 0;
+    }
   };
 
   TakeRecorder(Config config, Telemetry& telemetry);

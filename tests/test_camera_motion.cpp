@@ -81,3 +81,29 @@ TEST_CASE("camera dolly is proportional and bounded") {
   dollyOrbitCamera(camera, -1000.0f);
   CHECK(camera.distance == doctest::Approx(20.0f));
 }
+
+TEST_CASE("camera-local translation moves the whole orbit rig") {
+  OrbitCamera camera;
+  camera.yaw = 0.0f;
+  camera.pitch = 0.0f;
+  camera.distance = 0.8f;
+  translateOrbitCamera(camera, {.right_m = 0.25f, .up_m = 0.5f, .forward_m = 1.0f});
+
+  CHECK(camera.pivot[0] == doctest::Approx(0.25f));
+  CHECK(camera.pivot[1] == doctest::Approx(0.5f));
+  CHECK(camera.pivot[2] == doctest::Approx(-3.0f));
+  CHECK(camera.distance == doctest::Approx(0.8f));
+}
+
+TEST_CASE("pitched camera translation follows local forward and optical zoom is bounded") {
+  OrbitCamera camera;
+  camera.pitch = 0.5f;
+  const float initial_y = camera.pivot[1];
+  translateOrbitCamera(camera, {.forward_m = 1.0f});
+  CHECK(camera.pivot[1] < initial_y);
+
+  zoomOrbitCamera(camera, 1000.0f);
+  CHECK(camera.fovy == doctest::Approx(0.261799f));
+  zoomOrbitCamera(camera, -1000.0f);
+  CHECK(camera.fovy == doctest::Approx(1.745329f));
+}

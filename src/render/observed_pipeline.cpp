@@ -90,6 +90,8 @@ bool ObservedPipeline::init() {
   boundary_tex_ = tex2d(GL_RG16F, kW, kH, GL_NEAREST);
   coloruv_tex_ = tex2d(GL_RG16F, kW, kH, GL_NEAREST);
   flow_tex_ = tex2d(GL_RGBA32F, FlowField::kW, FlowField::kH, GL_LINEAR);
+  const float zero_flow[4] = {0, 0, 0, 0};
+  glClearTexImage(flow_tex_, 0, GL_RGBA, GL_FLOAT, zero_flow);
   color_preview_target_ = gl::makeTarget(kColorWidth, kColorHeight, GL_RGBA8);
 
   // PBO rings (E4: kill the synchronous-upload p95 spikes)

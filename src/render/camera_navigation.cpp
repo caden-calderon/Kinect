@@ -9,6 +9,8 @@ namespace {
 constexpr float kMaximumPitch = 1.53589f;  // 88 degrees
 constexpr float kMinimumDistance = 0.05f;
 constexpr float kMaximumDistance = 20.0f;
+constexpr float kMinimumFov = 0.261799f;  // 15 degrees
+constexpr float kMaximumFov = 1.745329f;  // 100 degrees
 }  // namespace
 
 void orbitCamera(OrbitCamera& camera, const PointerDelta& delta, float radians_per_pixel) {
@@ -35,8 +37,26 @@ void panOrbitCamera(OrbitCamera& camera, const PointerDelta& delta, float viewpo
 }
 
 void dollyOrbitCamera(OrbitCamera& camera, float wheel_delta) {
-  camera.distance = std::clamp(camera.distance * std::exp(-wheel_delta * 0.1f), kMinimumDistance,
+  camera.distance = std::clamp(camera.distance * std::exp(-wheel_delta * 0.16f), kMinimumDistance,
                                kMaximumDistance);
+}
+
+void translateOrbitCamera(OrbitCamera& camera, const CameraTranslation& translation) {
+  const float cy = std::cos(camera.yaw);
+  const float sy = std::sin(camera.yaw);
+  const float cp = std::cos(camera.pitch);
+  const float sp = std::sin(camera.pitch);
+  const float right[3] = {cy, 0.0f, sy};
+  const float up[3] = {sy * sp, cp, -cy * sp};
+  const float forward[3] = {sy * cp, -sp, -cy * cp};
+  for (int axis = 0; axis < 3; ++axis) {
+    camera.pivot[axis] += right[axis] * translation.right_m + up[axis] * translation.up_m +
+                          forward[axis] * translation.forward_m;
+  }
+}
+
+void zoomOrbitCamera(OrbitCamera& camera, float wheel_delta) {
+  camera.fovy = std::clamp(camera.fovy * std::exp(-wheel_delta * 0.08f), kMinimumFov, kMaximumFov);
 }
 
 }  // namespace kstudio

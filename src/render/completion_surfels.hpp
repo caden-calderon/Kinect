@@ -15,10 +15,16 @@ struct CompletionSurfel {
   float completion_weight = 0.0f;
 };
 
-/// Converts inferred arm support volumes into a bounded point surface. The
-/// observed raster is not consulted here: GPU composition suppresses surfels
-/// already supported by the current depth texture without mutating either
-/// layer.
+/// Center-sample half of the GPU support rule, exposed for regression tests.
+/// Returns 1 when the candidate is already measured or would contradict the
+/// measured foreground, and 0 when it is genuinely behind that observation.
+float completionCenterSupportRejection(float candidate_depth_m, bool observed_valid,
+                                       float observed_depth_m, float support_tolerance_m);
+
+/// Converts tracked arm support volumes into bounded completion candidates.
+/// Joint provenance adjusts confidence but never decides surface visibility:
+/// the GPU observed-raster support test suppresses measured or contradicted
+/// candidates without mutating either layer.
 class CompletionSurfelBuilder {
  public:
   static constexpr int kRadialSegments = 12;

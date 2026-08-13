@@ -1,0 +1,263 @@
+#version 460 core
+
+// Persistent artistic depth volume. Every slot is stable and every lifecycle
+// boundary is keyed to (absolute source frame, slot), never render time.
+
+layout(local_size_x = 256) in;
+
+struct Particle {
+  vec4 position_age;       // depth-camera xyz, age in source frames
+  vec4 velocity_lifetime;  // meters/second, lifetime in source frames
+  vec4 anchor_depth;       // return target xyz, authored depth offset
+  vec4 source_band_alive;  // source depth pixel xy, band enum, alive flag
+};
+
+layout(std430, binding = 0) buffer ParticlePool { Particle particles[]; };
+
+layout(binding = 0) uniform sampler2D observed_position_tex;
+layout(binding = 1) uniform sampler2D observed_normal_tex;
+layout(binding = 2) uniform sampler2D observed_boundary_tex;
+layout(binding = 3) uniform sampler2D previous_position_tex;
+
+uniform uint source_frame;
+uniform uint frame_delta;
+uniform uint active_count;
+uniform uint previous_active_count;
+uniform float near_depth_m;
+uniform float far_depth_m;
+uniform float wisp_share;
+uniform float silhouette_bias;
+uniform float motion_bias;
+uniform float curl_strength;
+uniform float backward_drift;
+uniform float drag;
+uniform float anchor_return;
+uniform float subject_depth_m;
+uniform float source_band_m;
+uniform vec4 crop;
+
+const ivec2 kRasterSize = ivec2(512, 424);
+const uint kRasterPixels = 512u * 424u;
+
+uint hash32(uint value) {
+  value ^= value >> 16u;
+  value *= 0x7feb352du;
+  value ^= value >> 15u;
+  value *= 0x846ca68bu;
+  value ^= value >> 16u;
+  return value;
+}
+
+float hashUnit(uint value) {
+  return float(hash32(value) & 0x00ffffffu) * (1.0 / 16777216.0);
+}
+
+uint lifetimeFrames(uint slot) {
+  return 72u + hash32(slot ^ 0x9e3779b9u) % 97u;
+}
+
+bool respawnDue(uint slot, uint period) {
+  if (frame_delta >= period) return true;
+  uint phase = ((source_frame % period) + (slot % period)) % period;
+  return phase < frame_delta;
+}
+
+uint bandForSlot(uint slot) {
+  float selector = hashUnit(slot ^ 0xa511e9b3u);
+  float clamped_wisp_share = clamp(wisp_share, 0.0, 0.35);
+  if (selector < clamped_wisp_share) return 2u;
+  if (selector < clamped_wisp_share + 0.26) return 1u;
+  return 0u;
+}
+
+float depthForSlot(uint slot, uint band) {
+  float near_depth = clamp(near_depth_m, 0.01, 2.0);
+  float far_depth = max(clamp(far_depth_m, 0.02, 3.0), near_depth + 0.01);
+  float selector = hashUnit(slot ^ 0x68bc21ebu);
+  if (band == 0u) return near_depth * (0.08 + 0.92 * selector * selector);
+  if (band == 1u) return mix(near_depth * 0.55, far_depth, selector);
+  return far_depth * (0.65 + 0.70 * selector);
+}
+
+vec3 randomVector(uint seed) {
+  return vec3(hashUnit(seed ^ 0x12f37a91u), hashUnit(seed ^ 0x91e10da5u),
+              hashUnit(seed ^ 0xd1b54a35u)) *
+             2.0 -
+         1.0;
+}
+
+// Cheap divergence-like field. It is deliberately low frequency: high
+// frequency noise makes a body look furry instead of volumetric.
+vec3 fieldSample(vec3 point, uint seed) {
+  vec3 q = point * 2.1 + randomVector(seed) * 1.7;
+  return normalize(vec3(sin(q.y + q.z * 0.73) - cos(q.z - q.y * 0.41),
+                        sin(q.z + q.x * 0.61) - cos(q.x - q.z * 0.37),
+                        sin(q.x + q.y * 0.47) - cos(q.y - q.x * 0.53)) +
+                   vec3(1e-4));
+}
+
+bool sourceAt(ivec2 pixel, out vec3 position, out vec3 normal, out float boundary,
+              out vec3 source_velocity) {
+  vec2 raster_uv = (vec2(pixel) + 0.5) / vec2(kRasterSize);
+  if (raster_uv.x < crop.x || raster_uv.y < crop.y || raster_uv.x > crop.z ||
+      raster_uv.y > crop.w)
+    return false;
+
+  vec4 observed = texelFetch(observed_position_tex, pixel, 0);
+  if (observed.w < 0.5) return false;
+  float depth_m = -observed.z;
+  if (subject_depth_m > 0.05 && abs(depth_m - subject_depth_m) > source_band_m) return false;
+
+  position = observed.xyz;
+  normal = normalize(texelFetch(observed_normal_tex, pixel, 0).xyz + vec3(1e-6));
+  boundary = texelFetch(observed_boundary_tex, pixel, 0).r;
+  source_velocity = vec3(0.0);
+  vec4 previous = texelFetch(previous_position_tex, pixel, 0);
+  if (previous.w > 0.5) {
+    float delta_seconds = max(float(frame_delta), 1.0) * (1.0 / 30.0);
+    vec3 measured_velocity = (position - previous.xyz) / delta_seconds;
+    float measured_speed = length(measured_velocity);
+    // Same-pixel depth motion is intentionally conservative: discontinuity
+    // edges already carry the wisp mask, while large correspondence jumps are
+    // more likely newly exposed geometry than usable surface velocity.
+    if (measured_speed <= 2.5) source_velocity = measured_velocity;
+  }
+  return true;
+}
+
+vec3 backDirection(vec3 source_position, vec3 source_normal, float boundary) {
+  vec3 away_from_sensor = normalize(source_position);
+  vec3 behind_surface = -normalize(source_normal);
+  float ray_weight = 0.48 + 0.40 * clamp(boundary, 0.0, 1.0);
+  vec3 direction = normalize(mix(behind_surface, away_from_sensor, ray_weight));
+  // Bad normals must never send invented matter into visible foreground.
+  if (dot(direction, away_from_sensor) < 0.25)
+    direction = normalize(mix(direction, away_from_sensor, 0.72));
+  return direction;
+}
+
+vec3 inheritedMotion(vec3 source_velocity) {
+  return source_velocity * motion_bias * 0.32;
+}
+
+bool chooseSource(uint slot, uint band, out ivec2 best_pixel, out vec3 best_position,
+                  out vec3 best_normal, out float best_boundary, out vec3 best_velocity) {
+  float best_score = -1.0;
+  bool found = false;
+  for (uint attempt = 0u; attempt < 12u; ++attempt) {
+    uint seed = hash32(slot ^ (source_frame * 0x9e3779b9u) ^ (attempt * 0x85ebca6bu));
+    uint linear_pixel = seed % kRasterPixels;
+    ivec2 pixel = ivec2(int(linear_pixel % 512u), int(linear_pixel / 512u));
+    vec3 position;
+    vec3 normal;
+    float boundary;
+    vec3 source_velocity;
+    if (!sourceAt(pixel, position, normal, boundary, source_velocity)) continue;
+
+    float motion = clamp(length(source_velocity) * 0.65, 0.0, 1.0);
+    float tie_break = hashUnit(seed ^ 0x27d4eb2du) * 0.04;
+    float score = band == 2u
+                      ? boundary * silhouette_bias + motion * motion_bias + tie_break
+                      : 1.0 - boundary * 0.08 + tie_break;
+    if (score > best_score) {
+      best_score = score;
+      best_pixel = pixel;
+      best_position = position;
+      best_normal = normal;
+      best_boundary = boundary;
+      best_velocity = source_velocity;
+      found = true;
+    }
+  }
+  return found;
+}
+
+void killSlot(uint slot) {
+  Particle particle;
+  particle.position_age = vec4(0.0);
+  particle.velocity_lifetime = vec4(0.0);
+  particle.anchor_depth = vec4(0.0);
+  particle.source_band_alive = vec4(0.0);
+  particles[slot] = particle;
+}
+
+void spawnSlot(uint slot, uint band, uint period) {
+  ivec2 pixel;
+  vec3 source_position;
+  vec3 source_normal;
+  float boundary;
+  vec3 source_velocity;
+  if (!chooseSource(slot, band, pixel, source_position, source_normal, boundary,
+                    source_velocity)) {
+    killSlot(slot);
+    return;
+  }
+
+  float authored_depth = depthForSlot(slot, band);
+  vec3 direction = backDirection(source_position, source_normal, boundary);
+  vec3 target = source_position + direction * authored_depth;
+  float initial_fill = mix(0.28, 0.96, hashUnit(slot ^ source_frame ^ 0xc2b2ae35u));
+  vec3 position = source_position + direction * authored_depth * initial_fill;
+  float band_drift = band == 0u ? 0.45 : (band == 1u ? 0.75 : 1.45);
+  vec3 velocity = direction * backward_drift * band_drift + inheritedMotion(source_velocity);
+  velocity += fieldSample(position, slot) * backward_drift * (band == 2u ? 0.65 : 0.18);
+
+  Particle particle;
+  particle.position_age = vec4(position, 0.0);
+  particle.velocity_lifetime = vec4(velocity, float(period));
+  particle.anchor_depth = vec4(target, authored_depth);
+  particle.source_band_alive = vec4(vec2(pixel), float(band), 1.0);
+  particles[slot] = particle;
+}
+
+void main() {
+  uint slot = gl_GlobalInvocationID.x;
+  if (slot >= active_count) return;
+
+  Particle particle = particles[slot];
+  uint band = bandForSlot(slot);
+  uint period = lifetimeFrames(slot);
+  bool newly_activated = slot >= previous_active_count;
+  if (particle.source_band_alive.w < 0.5 || newly_activated || respawnDue(slot, period)) {
+    spawnSlot(slot, band, period);
+    return;
+  }
+
+  // Direct depth/band dials reshape existing matter immediately; source
+  // selection biases take effect on the next normal respawn.
+  particle.source_band_alive.z = float(band);
+  particle.anchor_depth.w = depthForSlot(slot, band);
+  ivec2 source_pixel = ivec2(round(particle.source_band_alive.xy));
+  vec3 source_position;
+  vec3 source_normal;
+  float boundary;
+  vec3 source_velocity;
+  vec3 inherited_motion = vec3(0.0);
+  if (source_pixel.x >= 0 && source_pixel.y >= 0 && source_pixel.x < 512 &&
+      source_pixel.y < 424 &&
+      sourceAt(source_pixel, source_position, source_normal, boundary, source_velocity)) {
+    vec3 direction = backDirection(source_position, source_normal, boundary);
+    particle.anchor_depth.xyz = source_position + direction * particle.anchor_depth.w;
+    inherited_motion = inheritedMotion(source_velocity);
+  }
+
+  float delta_seconds = min(float(frame_delta), 6.0) * (1.0 / 30.0);
+  vec3 to_anchor = particle.anchor_depth.xyz - particle.position_age.xyz;
+  vec3 force = to_anchor * anchor_return;
+  force += fieldSample(particle.position_age.xyz, slot ^ source_frame) * curl_strength;
+  force += inherited_motion * 0.65;
+  vec3 velocity = particle.velocity_lifetime.xyz + force * delta_seconds;
+  velocity *= exp(-max(drag, 0.0) * delta_seconds);
+  float speed = length(velocity);
+  if (speed > 1.8) velocity *= 1.8 / speed;
+  particle.position_age.xyz += velocity * delta_seconds;
+  particle.position_age.w += float(frame_delta);
+  particle.velocity_lifetime.xyz = velocity;
+
+  if (any(isnan(particle.position_age)) || any(isinf(particle.position_age)) ||
+      length(particle.position_age.xyz - particle.anchor_depth.xyz) > 2.5) {
+    killSlot(slot);
+    return;
+  }
+  particles[slot] = particle;
+}

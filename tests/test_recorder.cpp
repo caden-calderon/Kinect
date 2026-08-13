@@ -131,6 +131,30 @@ TEST_CASE("clean take: every submitted frame written, readable, reconciled") {
   std::filesystem::remove(path.string() + ".journal");
 }
 
+TEST_CASE("capture sequence gaps make an otherwise fully written take non-clean") {
+  const auto path = tempTake("capture-gap.mcap");
+  Telemetry telemetry;
+  TakeRecorder::Config config;
+  config.take_path = path;
+  TakeRecorder recorder(config, telemetry);
+  REQUIRE(recorder.start(std::make_shared<CalibrationBlob>()));
+
+  EventFactory factory;
+  auto event = factory.depth(3);
+  event.health.gap_before = 2;
+  recorder.submitDepth(event);
+  const auto result = recorder.stop();
+
+  CHECK(result.depth_submitted == 1);
+  CHECK(result.depth_written == 1);
+  CHECK(result.depth_dropped == 0);
+  CHECK(result.capture_gaps_depth == 2);
+  CHECK_FALSE(result.clean());
+
+  std::filesystem::remove(path);
+  std::filesystem::remove(path.string() + ".journal");
+}
+
 TEST_CASE("disk-full: explicit Failed state, journal survives, no abort") {
   const auto path = tempTake("full.mcap");
   Telemetry telemetry;

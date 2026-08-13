@@ -88,6 +88,18 @@ disperse→reassemble via anchor-return.
 *Non-goals:* body-local frames, proxy-surface attraction (needs 7),
 skeleton-gated emission (needs 7).
 
+*Current (2026-08-09):* Spectral Backfill is restored to its first positive live
+baseline: a fixed 500k-slot pool with 250k active by default, observed-surface
+emission, three designed depth bands, deterministic full-pool lifecycles,
+same-pixel source motion, one anchor-return response, additive compositing,
+direct controls, the original Astral Wake preset, hot reload, and per-pass GPU
+timing. Later measured-depth prepass, style coupling, source reprojection,
+filtered subject displacement, lateral scatter, and distributed spring
+experiments were rejected as visual regressions and removed. Baseline
+replay/live smokes pass. History ribbons, the sustained installation soak, and
+Caden's visual reconfirmation remain; this phase is therefore not marked
+complete.
+
 ## Phase 6 — Sustained performance hardening
 
 *Entry:* Phases 3–5. *Contains:* soak tests live+record+particles;
@@ -110,8 +122,10 @@ frames, and bone emitters against this contract.
 telemetry, and `observed` / `completion` / `diagnostic` compositor are
 implemented as of 2026-08-01. Landmark presence is separated from visibility,
 limb depth association is model-consistency gated, and occluded elbows use a
-stable two-link arm constraint. The source-keyed frozen pose sidecar and live
-completion run remain.
+stable two-link arm constraint. A 2026-08-09 correction decoupled arm-surface
+candidate eligibility from endpoint provenance; the observed raster now owns
+visibility even when every joint is located. The source-keyed frozen pose
+sidecar and live completion verdict remain.
 *Exit gate:* tracking dropout degrades aesthetically (release/fallback), never
 crashes; live contention meets the E6 gate; the later skeleton term improves
 fast-swing response on the golden/body take. *Non-goals:* parametric mesh
@@ -120,11 +134,16 @@ fitting.
 ## Phase 8 — Inferred-body experiment lane
 
 *Entry:* Phase 7. *Contains:* Caden's E6 verdict rejected complete visible
-capsules but retained them as support volumes. The active E6b slice is
-arm-first Magnetic Completion: depth-consistent joint association, two-link
-hidden-elbow solving, and observed-raster support masking over bounded inferred
-surfels. If that local completion still cannot produce plausible free-orbit
-volume, evaluate a low-Hz parametric fitter provider (license posture per
+capsules but retained them as invisible support volumes. Arm-first Magnetic
+Completion now has depth-consistent joint association, two-link hidden-elbow
+solving, and observed-raster support masking over bounded inferred candidates;
+its last zero-candidate eligibility defect was corrected 2026-08-09. Spectral
+Backfill supplies the separate artistic live-volume lane; its first live
+reaction is positive and final visual acceptance is still being evaluated.
+The local `kstudio-body-extract`/validator now prepares immutable,
+content-addressed RGB-D input bundles without starting cloud work. If local inferred
+completion still cannot produce plausible free-orbit volume after the new live
+test, evaluate a low-Hz parametric fitter provider (license posture per
 [10](10-open-decisions.md)); do not adopt one merely because the diagnostic
 mannequin looked crude.
 *Exit gate:* Magnetic Completion accepted by Caden; measured/inferred

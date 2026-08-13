@@ -2,6 +2,7 @@
 
 #include <mcap/reader.hpp>
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -36,11 +37,20 @@ std::string jsonString(const std::string& json, const std::string& key) {
   return json.substr(start, end - start);
 }
 
+uint64_t jsonHex(const std::string& json, const std::string& key, uint64_t fallback = 0) {
+  const std::string value = jsonString(json, key);
+  if (value.empty()) return fallback;
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(value.c_str(), &end, 16);
+  return end != value.c_str() && *end == '\0' ? uint64_t(parsed) : fallback;
+}
+
 }  // namespace
 
 struct TakeReader::Impl {
   mcap::McapReader reader;
   std::shared_ptr<CalibrationBlob> calib;
+  std::string calibration_json;
 
   std::vector<uint64_t> depth_times;  // logTime per depth frame, in play order
 
@@ -58,6 +68,7 @@ struct TakeReader::Impl {
     std::memcpy(&header, msg.message.data, sizeof(header));
     const auto* payload = reinterpret_cast<const uint8_t*>(msg.message.data) + sizeof(header);
     const size_t payload_size = msg.message.dataSize - sizeof(header);
+    if (header.payload_len != payload_size) return false;
 
     if (topic == "/depth") {
       if (payload_size != size_t(kDepthWidth) * kDepthHeight * 2) return false;
@@ -95,6 +106,7 @@ TakeReader::TakeReader() : impl_(std::make_unique<Impl>()) {}
 TakeReader::~TakeReader() { close(); }
 
 bool TakeReader::open(const std::filesystem::path& path) {
+  close();
   if (!impl_->reader.open(path.string()).ok()) return false;
   (void)impl_->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan);
 
@@ -111,13 +123,17 @@ bool TakeReader::open(const std::filesystem::path& path) {
       } else if (topic == "/calibration") {
         const std::string json(reinterpret_cast<const char*>(msg.message.data),
                                msg.message.dataSize);
+        impl_->calibration_json = json;
         calib->device_serial = jsonString(json, "serial");
         calib->firmware = jsonString(json, "firmware");
+        calib->content_hash = jsonHex(json, "content_hash");
         auto& ir = calib->ir;
         ir.fx = float(jsonNumber(json, "fx"));  // first "fx" is ir's (ir object precedes color)
         // ir block
         const auto ir_pos = json.find("\"ir\":");
         const auto color_pos = json.find("\"color\":");
+        if (ir_pos == std::string::npos || color_pos == std::string::npos || color_pos <= ir_pos)
+          continue;
         const std::string ir_json = json.substr(ir_pos, color_pos - ir_pos);
         const std::string color_json = json.substr(color_pos);
         ir.fx = float(jsonNumber(ir_json, "fx"));
@@ -136,6 +152,26 @@ bool TakeReader::open(const std::filesystem::path& path) {
         c.cy = float(jsonNumber(color_json, "cy"));
         c.shift_d = float(jsonNumber(color_json, "shift_d"));
         c.shift_m = float(jsonNumber(color_json, "shift_m"));
+        c.mx_x3y0 = float(jsonNumber(color_json, "mx_x3y0"));
+        c.mx_x0y3 = float(jsonNumber(color_json, "mx_x0y3"));
+        c.mx_x2y1 = float(jsonNumber(color_json, "mx_x2y1"));
+        c.mx_x1y2 = float(jsonNumber(color_json, "mx_x1y2"));
+        c.mx_x2y0 = float(jsonNumber(color_json, "mx_x2y0"));
+        c.mx_x0y2 = float(jsonNumber(color_json, "mx_x0y2"));
+        c.mx_x1y1 = float(jsonNumber(color_json, "mx_x1y1"));
+        c.mx_x1y0 = float(jsonNumber(color_json, "mx_x1y0"));
+        c.mx_x0y1 = float(jsonNumber(color_json, "mx_x0y1"));
+        c.mx_x0y0 = float(jsonNumber(color_json, "mx_x0y0"));
+        c.my_x3y0 = float(jsonNumber(color_json, "my_x3y0"));
+        c.my_x0y3 = float(jsonNumber(color_json, "my_x0y3"));
+        c.my_x2y1 = float(jsonNumber(color_json, "my_x2y1"));
+        c.my_x1y2 = float(jsonNumber(color_json, "my_x1y2"));
+        c.my_x2y0 = float(jsonNumber(color_json, "my_x2y0"));
+        c.my_x0y2 = float(jsonNumber(color_json, "my_x0y2"));
+        c.my_x1y1 = float(jsonNumber(color_json, "my_x1y1"));
+        c.my_x1y0 = float(jsonNumber(color_json, "my_x1y0"));
+        c.my_x0y1 = float(jsonNumber(color_json, "my_x0y1"));
+        c.my_x0y0 = float(jsonNumber(color_json, "my_x0y0"));
         have_calib = true;
       }
     }
@@ -156,9 +192,16 @@ void TakeReader::close() {
   impl_->it.reset();
   impl_->view.reset();
   impl_->reader.close();
+  impl_->calib.reset();
+  impl_->calibration_json.clear();
+  impl_->depth_times.clear();
+  impl_->color_scratch.clear();
+  impl_->next_depth_index = 0;
 }
 
 std::shared_ptr<const CalibrationBlob> TakeReader::calibration() const { return impl_->calib; }
+
+const std::string& TakeReader::calibrationJson() const { return impl_->calibration_json; }
 
 size_t TakeReader::depthFrameCount() const { return impl_->depth_times.size(); }
 

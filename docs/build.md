@@ -73,7 +73,8 @@ mkdir -p out && ./build/e1_probe -t 600 -o out -p cl   # -p gl for fallback
 
 Present when this was written: `libusb 1.0.30`, `libjpeg-turbo 3.2.0`
 (TurboJPEG), `glfw 3.4`, `ocl-icd 2.3.4` + `opencl-nvidia 610.43.03`,
-`cmake 4.4.0`, `ninja`, `gcc 16.1.1`, `opencv 5.0.0` (for E2), Python 3
+`cmake 4.4.0`, `ninja`, `gcc 16.1.1`, `openssl 3.6.3` (offline bundle
+SHA-256), `opencv 5.0.0` (for E2), Python 3
 (providers, analysis), and `bubblewrap` (the pose-provider network sandbox).
 Not present: `cuda`, `opencl-headers` (vendored
 instead), `mcap` (vendored per-spike via FetchContent).

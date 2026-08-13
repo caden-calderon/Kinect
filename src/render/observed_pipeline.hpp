@@ -72,7 +72,10 @@ class ObservedPipeline {
   bool hasCurrentColor() const { return have_color_; }
 
   GLuint positionTex() const { return position_tex_; }
+  GLuint normalTex() const { return normal_tex_; }
   GLuint boundaryTex() const { return boundary_tex_; }
+  GLuint colorUvTex() const { return coloruv_tex_; }
+  GLuint flowTex() const { return flow_tex_; }
 
   gl::PassTimer& uploadTimer() { return t_upload_; }
   gl::PassTimer& geometryTimer() { return t_geometry_; }

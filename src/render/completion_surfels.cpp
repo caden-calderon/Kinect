@@ -29,6 +29,15 @@ float smoothCoverage(float value) {
 
 }  // namespace
 
+float completionCenterSupportRejection(float candidate_depth_m, bool observed_valid,
+                                       float observed_depth_m, float support_tolerance_m) {
+  if (!std::isfinite(candidate_depth_m) || candidate_depth_m <= 0.05f || !observed_valid ||
+      !std::isfinite(observed_depth_m) || observed_depth_m <= 0.0f)
+    return 0.0f;
+  support_tolerance_m = std::max(support_tolerance_m, 0.0f);
+  return candidate_depth_m <= observed_depth_m + support_tolerance_m ? 1.0f : 0.0f;
+}
+
 CompletionSurfelBuilder::CompletionSurfelBuilder() { surfels_.reserve(kMaximumSurfels); }
 
 void CompletionSurfelBuilder::build(const CapsuleBody& body, float radius_scale) {
@@ -47,7 +56,6 @@ void CompletionSurfelBuilder::addArmCapsule(const Capsule& capsule, float radius
 
   const float inferred_a = 1.0f - std::clamp(capsule.a_observed_weight, 0.0f, 1.0f);
   const float inferred_b = 1.0f - std::clamp(capsule.b_observed_weight, 0.0f, 1.0f);
-  if (std::max(inferred_a, inferred_b) < 0.01f) return;
 
   const Vec3 span = capsule.b - capsule.a;
   const float span_length = length(span);
@@ -66,8 +74,11 @@ void CompletionSurfelBuilder::addArmCapsule(const Capsule& capsule, float radius
 
   for (int axial_index = 0; axial_index <= axial_segments; ++axial_index) {
     const float t = float(axial_index) / float(axial_segments);
-    const float completion_weight = smoothCoverage(inferred_a * (1.0f - t) + inferred_b * t);
-    if (completion_weight < 0.005f) continue;
+    // Located joints do not prove that the limb surface between them was
+    // visible. Always provide bounded candidates; inferred endpoints only
+    // increase their weight. The observed raster is the visibility authority.
+    const float inferred_weight = inferred_a * (1.0f - t) + inferred_b * t;
+    const float completion_weight = smoothCoverage(0.55f + 0.45f * inferred_weight);
     const Vec3 center = capsule.a + span * t;
     for (int radial_index = 0; radial_index < kRadialSegments; ++radial_index) {
       const float angle =

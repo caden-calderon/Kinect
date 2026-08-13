@@ -1,7 +1,7 @@
 # Plan — articulated occlusion completion
 
-**Status:** first implementation complete; Caden's live extended-arm
-acceptance remains open after the 2026-08-01 E6 correction.
+**Status:** eligibility defect corrected 2026-08-09; Caden's live extended-arm
+acceptance remains open.
 
 ## Decision
 
@@ -38,6 +38,23 @@ reported zero malformed results, and measured 51.75 ms signal-age p95. No
 performer was acquired during that unattended run, so it verifies contention
 and fallback—not the qualitative arm bridge. Caden's extended-arm test is the
 remaining acceptance gate.
+
+## Eligibility correction — 2026-08-09
+
+Caden's next live review saw no useful difference in completion mode. The
+cause was concrete: `CompletionSurfelBuilder` returned early whenever both
+capsule endpoints were `ObservedDepth`. That answered whether joint positions
+were known, not whether the arm surface between them was visible. A hand can
+occlude its forearm while shoulder, elbow, and wrist landmarks all remain
+located, so this condition legitimately produced zero completion geometry.
+
+Every usable arm/hand span now generates bounded candidates. Inferred endpoint
+evidence raises candidate weight, while the existing observed-position raster
+test remains the authority that rejects measured or foreground-contradicted
+surface and permits only geometry behind an occluder. Regression coverage
+proves an all-observed chain produces candidates and that center-depth support
+still protects visible pixels. Visual acceptance has not been inferred from
+those machine checks.
 
 ## Why the first hybrid failed
 
@@ -116,7 +133,8 @@ anatomical length constraint and a clear uncertainty source.
 Capsules become invisible support volumes for generating bounded surfels:
 
 - endpoint provenance is kept separately, not averaged into one capsule bit;
-- inferred coverage fades from an observed endpoint toward an inferred joint;
+- inferred evidence increases weight toward an inferred joint, but a fully
+  observed endpoint chain still supplies candidates for the visibility test;
 - each candidate surfel projects back into the Kinect depth raster;
 - a candidate close to measured geometry is suppressed as already supported;
 - an unsupported candidate remains in the inferred layer and is depth-tested

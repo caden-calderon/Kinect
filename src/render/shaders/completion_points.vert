@@ -37,6 +37,7 @@ float observedRejection(vec3 candidate) {
   vec4 center_observed = texelFetch(observed_position_tex, center, 0);
   if (center_observed.w > 0.5) {
     float observed_depth_m = -center_observed.z;
+    // Mirrored by completionCenterSupportRejection() for regression tests.
     if (depth_m <= observed_depth_m + support_tolerance_m) return 1.0;
   }
 

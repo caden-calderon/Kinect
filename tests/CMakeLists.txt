@@ -16,9 +16,11 @@ add_executable(kstudio_tests
   test_params.cpp
   test_recorder.cpp
   test_replay.cpp
+  test_spectral_backfill.cpp
   test_subject_focus.cpp
   test_flow_engine.cpp
   test_body_tracker.cpp
+  test_body_bundle.cpp
   test_capsule_body.cpp
   test_capsule_mesh.cpp
   test_completion_surfels.cpp
@@ -26,7 +28,7 @@ add_executable(kstudio_tests
   test_pose_protocol.cpp
   test_pose_provider.cpp
 )
-target_link_libraries(kstudio_tests PRIVATE kstudio_core kstudio_render doctest::doctest)
+target_link_libraries(kstudio_tests PRIVATE kstudio_core kstudio_offline kstudio_render doctest::doctest)
 target_compile_definitions(kstudio_tests PRIVATE
   KSTUDIO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
   KSTUDIO_FAKE_POSE_PROVIDER="$<TARGET_FILE:kstudio-fake-pose-provider>")
